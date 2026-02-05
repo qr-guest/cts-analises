@@ -8,4 +8,6 @@ openpyxl
 vl-convert-python
 streamlit-flow-component
 altair<5
+streamlit==1.38.0
+pillow>=10.0.0
 

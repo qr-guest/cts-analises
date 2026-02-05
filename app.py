@@ -121,7 +121,7 @@ if(login_inicio_c or login_inicio_g):
         st.write(get_text("app_intro"))
 
         logo = str(os.getenv("logo"))
-        st.logo(logo)
+        ##st.logo(logo)
 
         if(login_inicio_g):
             with st.sidebar:
