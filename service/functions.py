@@ -546,12 +546,12 @@ def get_rvt_by_person(df_rvt, mes, ano, ytd):
     col1, col2 = st.columns(2)
     base = alt.Chart(df_anonimo).encode(
         x=alt.X('QTD RVT:Q'),
-        y=alt.Y('Nome', 
+        y=alt.Y('Nome', sort='-x',
         axis=alt.Axis(
             labelFontSize=14,  
             titleFontSize=16,   
             labelLimit=500   
-        )).sort('-x'), 
+        )), 
         text='QTD RVT'
     ).properties(
         width=800, 
@@ -563,12 +563,12 @@ def get_rvt_by_person(df_rvt, mes, ano, ytd):
 
     base = alt.Chart(df_source).encode(
         x=alt.X('QTD RVT:Q'),
-        y=alt.Y('Nome', 
+        y=alt.Y('Nome', sort='-x',
         axis=alt.Axis(
             labelFontSize=14,  
             titleFontSize=16,   
             labelLimit=500   
-        )).sort('-x'), 
+        )), 
         text='QTD RVT'
     ).properties(
         width=800, 
