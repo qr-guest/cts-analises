@@ -77,7 +77,7 @@ def processar_arquivos_carregados(uploaded_files):
             
         elif(upload_file.name == 'Conexoes_RessarceBall.xlsx'):
             df_r_brasil_1 = pd.read_excel(upload_file, sheet_name="RES_Brasil")
-            df_r_brasil = limpar_df(df_r_brasil_1, colunas_data=["Emissão Gerente CTS em", "Emissão Gerente CTS em", "StatusFinal"])
+            df_r_brasil = limpar_df(df_r_brasil_1, colunas_data=["Data Conclusão","Emissão Gerente CTS em", "StatusFinal"])
             dados_carregados["df_r_brasil"] = df_r_brasil
             
             df_d_brasil_1 = pd.read_excel(upload_file, sheet_name="DEV_Brasil")
