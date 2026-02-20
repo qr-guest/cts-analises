@@ -71,10 +71,11 @@ if(login_inicio_c or login_inicio_g):
             if dados:
                 st.session_state.dados_carregados = dados
                 st.success("Arquivos carregados e processados com sucesso!")
-                st.rerun() 
+                st.rerun()
+            
 
     if 'dados_carregados' in st.session_state:
-        
+
         df_noc = st.session_state.dados_carregados.get('df_noc')
         df_rvt = st.session_state.dados_carregados.get('df_rvt')
         df_consulta = st.session_state.dados_carregados.get('df_consulta')
@@ -196,7 +197,7 @@ if(login_inicio_c or login_inicio_g):
             get_time_for_each_level(mes, ano, df_r_brasil, df_noc, 'Emissão Gerente CTS em', 'Carta de Crédito', tempo_resposta_niveis_br)
 
             get_time_for_each_level(mes, ano, df_d_brasil, df_noc, 'Data de Ultima Modificação - Solicitação de Devolução', 'Investigação', tempo_resposta_niveis_br)
-            get_time_for_each_level(mes, ano, df_d_brasil, df_noc, 'Data de Ultima Modificação - Aprovação dos Registros', 'Devolução', tempo_resposta_niveis_br)
+            get_time_for_each_level(mes, ano, df_d_brasil, df_noc, 'Data de Conclusão', 'Devolução', tempo_resposta_niveis_br)
 
             # st.write("RessarceBall Brasil")
 
