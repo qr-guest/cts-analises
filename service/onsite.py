@@ -20,6 +20,8 @@ DEFAULT_ONSITE_PATH = Path(
     "dados-onsite/Dados-snowflake_2026-06-23-0808.csv"
 )
 LOCAL_DATA_ENV = "ALLOW_LOCAL_DATA"
+ONSITE_UPLOAD_STATE_KEY = "onsite_uploaded_csv"
+ONSITE_DAMAGE_UPLOAD_STATE_KEY = "onsite_uploaded_damage_csv"
 
 EXPECTED_COLUMNS = [
     "INSPECTION_ID",
@@ -1459,11 +1461,31 @@ def render_onsite_dashboard():
                 "Modo local de desenvolvimento ativo por ALLOW_LOCAL_DATA=true. "
                 f"Fallback detectado: {default_path}"
             )
+        if st.button("Limpar base On-Site carregada", key="onsite_clear_uploads"):
+            st.session_state.pop(ONSITE_UPLOAD_STATE_KEY, None)
+            st.session_state.pop(ONSITE_DAMAGE_UPLOAD_STATE_KEY, None)
+            st.rerun()
+
+    if uploaded_file is not None:
+        st.session_state[ONSITE_UPLOAD_STATE_KEY] = {
+            "name": uploaded_file.name,
+            "contents": uploaded_file.getvalue(),
+        }
+    if uploaded_damage_file is not None:
+        st.session_state[ONSITE_DAMAGE_UPLOAD_STATE_KEY] = {
+            "name": uploaded_damage_file.name,
+            "contents": uploaded_damage_file.getvalue(),
+        }
+
+    stored_upload = st.session_state.get(ONSITE_UPLOAD_STATE_KEY)
+    stored_damage_upload = st.session_state.get(
+        ONSITE_DAMAGE_UPLOAD_STATE_KEY
+    )
 
     try:
-        if uploaded_file is not None:
-            source_df = load_onsite_upload(uploaded_file.getvalue())
-            source_name = uploaded_file.name
+        if stored_upload is not None:
+            source_df = load_onsite_upload(stored_upload["contents"])
+            source_name = stored_upload["name"]
         elif default_path is not None and default_path.exists():
             source_df = load_onsite_csv(
                 str(default_path),
@@ -1512,11 +1534,11 @@ def render_onsite_dashboard():
     damage_source = None
     damage_source_name = None
     try:
-        if uploaded_damage_file is not None:
+        if stored_damage_upload is not None:
             damage_source = load_onsite_upload(
-                uploaded_damage_file.getvalue()
+                stored_damage_upload["contents"]
             )
-            damage_source_name = uploaded_damage_file.name
+            damage_source_name = stored_damage_upload["name"]
         elif default_damage_path is not None and default_damage_path.exists():
             damage_source = load_onsite_csv(
                 str(default_damage_path),
