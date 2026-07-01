@@ -2,6 +2,8 @@ import pandas as pd
 import streamlit as st
 import os
 
+from service.metas import load_metas_workbook
+
 def limpar_df(df, colunas_remover=[], colunas_data=[]):
     st.write()
     date_columns = [col for col in df.columns if 'Data' in col]
@@ -9,11 +11,70 @@ def limpar_df(df, colunas_remover=[], colunas_data=[]):
         date_columns.extend(colunas_data)
     df = pd.DataFrame(df)
     if(colunas_remover):
-        df = df.drop(columns=colunas_remover)
+        # Remover apenas colunas que existem
+        df = df.drop(columns=[col for col in colunas_remover if col in df.columns])
     for col in date_columns:
-        df[col] = pd.to_datetime(df[col], format='mixed', errors='raise')
-        df[col] = df[col].dt.strftime('%d/%m/%Y')
+        if col in df.columns:
+            try:
+                df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True)
+                df[col] = df[col].dt.strftime('%d/%m/%Y')
+            except Exception as e:
+                # Se houver erro na conversão, deixar a coluna como está
+                pass
     return df
+
+def carregar_rotulos_monster(upload_file):
+    try:
+        upload_file.seek(0)
+        xls = pd.ExcelFile(upload_file)
+        sheet_map = {str(sheet).strip().lower(): sheet for sheet in xls.sheet_names}
+        sheet_name = sheet_map.get("rótulos monster") or sheet_map.get("rotulos monster")
+        if not sheet_name:
+            return []
+
+        df_rotulos = pd.read_excel(upload_file, sheet_name=sheet_name)
+        if df_rotulos.empty:
+            return []
+
+        primeira_coluna = df_rotulos.columns[0]
+        rotulos = [str(rotulo).strip().upper() for rotulo in df_rotulos[primeira_coluna].dropna()]
+        return [rotulo for rotulo in rotulos if rotulo]
+    except Exception:
+        return []
+    finally:
+        try:
+            upload_file.seek(0)
+        except Exception:
+            pass
+
+def carregar_copackers_monster(upload_file):
+    try:
+        upload_file.seek(0)
+        xls = pd.ExcelFile(upload_file)
+        sheet_map = {str(sheet).strip().lower(): sheet for sheet in xls.sheet_names}
+        sheet_name = sheet_map.get("copacker")
+        if not sheet_name:
+            return [], []
+
+        df_copacker = pd.read_excel(upload_file, sheet_name=sheet_name)
+        if df_copacker.empty or "divisao" in [str(col).strip().lower() for col in df_copacker.columns]:
+            return [], []
+
+        nocs = []
+        clientes = []
+        if "Numero NOC" in df_copacker.columns:
+            nocs = pd.to_numeric(df_copacker["Numero NOC"], errors="coerce").dropna().astype(int).tolist()
+        if "Clientes" in df_copacker.columns:
+            clientes = [str(cliente).strip().lower() for cliente in df_copacker["Clientes"].dropna()]
+
+        return nocs, [cliente for cliente in clientes if cliente]
+    except Exception:
+        return [], []
+    finally:
+        try:
+            upload_file.seek(0)
+        except Exception:
+            pass
 
 def processar_arquivos_carregados(uploaded_files):
     """
@@ -28,6 +89,14 @@ def processar_arquivos_carregados(uploaded_files):
 
     for upload_file in uploaded_files:
         print(f"Processando o arquivo: {upload_file.name}")
+        rotulos_monster = carregar_rotulos_monster(upload_file)
+        if rotulos_monster:
+            dados_carregados["monster_rotulos"] = sorted(set(dados_carregados.get("monster_rotulos", []) + rotulos_monster))
+        monster_copacker_nocs, monster_copacker_clientes = carregar_copackers_monster(upload_file)
+        if monster_copacker_nocs:
+            dados_carregados["monster_copacker_nocs"] = sorted(set(dados_carregados.get("monster_copacker_nocs", []) + monster_copacker_nocs))
+        if monster_copacker_clientes:
+            dados_carregados["monster_copacker_clientes"] = sorted(set(dados_carregados.get("monster_copacker_clientes", []) + monster_copacker_clientes))
         
         if(upload_file.name == 'CTS.xlsx'):
             # xls = pd.ExcelFile(upload_file)
@@ -118,6 +187,13 @@ def processar_arquivos_carregados(uploaded_files):
             dados_carregados["df_paraguai"] = df_paraguai
         
         
+    try:
+        dados_carregados.update(load_metas_workbook())
+    except Exception as error:
+        dados_carregados["metas_error"] = (
+            f"Não foi possível carregar a planilha de metas: {error}"
+        )
+
     return dados_carregados
 
 

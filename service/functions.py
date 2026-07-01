@@ -16,6 +16,7 @@ from streamlit_flow import streamlit_flow
 from streamlit_flow.elements import StreamlitFlowNode, StreamlitFlowEdge
 from streamlit_flow.state import StreamlitFlowState
 from copy import deepcopy
+import difflib
 
 @st.cache_data
 def load_translation(language):
@@ -57,6 +58,19 @@ dict_meses = {
         12: "Dez"
 }
 
+EXCLUDED_KA_OPTIONS = ['planta_ball','outros', 'argentina', 'chile', 'paraguai', 'bolivia', 'peru', 'copacker']
+
+MONSTER_ROTULO_TERMS = [
+    'MONSTER',
+    'MONST',
+    'MONS',
+    'MOST ENE',
+    'ULTRA VIOLET',
+    'ULT VIOLET',
+]
+
+MONSTER_ROTULO_TOKENS = {'MON', 'MONS', 'MONST', 'MONSTER'}
+
 def clientes_clean(cliente):
     cliente = str(cliente)
     cliente = cliente.lower()
@@ -65,7 +79,7 @@ def clientes_clean(cliente):
     return cliente
   
 def categorizar_divisao(cliente):
-    divisoes = st.session_state.dados_carregados.get('divisoes')
+    divisoes = st.session_state.get('dados_carregados', {}).get('divisoes', {})
     if pd.isna(cliente):
         return 'outros'
     cliente = clientes_clean(cliente)
@@ -78,19 +92,79 @@ def categorizar_divisao(cliente):
     st.info(get_text("unclassified_client_info", cliente=cliente))
     return 'outros'
 
+def get_divisoes_incidentes():
+    divisoes = st.session_state.get('dados_carregados', {}).get('divisoes', {})
+    divisoes_incidentes = dict(divisoes)
+    divisoes_incidentes.setdefault('monster', [])
+    return divisoes_incidentes
+
+def is_monster_incidente(row):
+    marca = str(row.get('Marca', '')).strip().upper()
+    if marca == 'MONSTER':
+        return True
+
+    rotulo = str(row.get('Rotulo do Produto', '')).strip().upper()
+    if not rotulo or rotulo == 'NAN':
+        return False
+
+    monster_rotulos = st.session_state.get('dados_carregados', {}).get('monster_rotulos', [])
+    for rotulo_monster in monster_rotulos:
+        rotulo_monster = str(rotulo_monster).strip().upper()
+        if rotulo_monster and rotulo_monster in rotulo:
+            return True
+
+    rotulo_tokens = rotulo
+    for separator in "#-/.,;:":
+        rotulo_tokens = rotulo_tokens.replace(separator, " ")
+    tokens = set(rotulo_tokens.split())
+
+    return any(term in rotulo for term in MONSTER_ROTULO_TERMS) or bool(tokens.intersection(MONSTER_ROTULO_TOKENS))
+
+def is_copacker_incidente(row, df_cop):
+    df_cop = df_cop or {}
+    cliente = str(row.get('Clientes', '')).lower()
+    return cliente in df_cop.get('copacker', [])
+
+def is_monster_copacker_incidente(row):
+    dados_carregados = st.session_state.get('dados_carregados', {})
+    cliente = str(row.get('Clientes', '')).strip().lower()
+    monster_copacker_clientes = dados_carregados.get('monster_copacker_clientes', [])
+    if cliente and cliente in monster_copacker_clientes:
+        return True
+
+    numero_noc = pd.to_numeric(row.get('Numero NOC'), errors='coerce')
+    if pd.notna(numero_noc):
+        return int(numero_noc) in dados_carregados.get('monster_copacker_nocs', [])
+
+    return False
+
+def categorizar_incidente(row, df_cop):
+    df_cop = df_cop or {}
+    if is_monster_incidente(row) or is_monster_copacker_incidente(row):
+        return 'monster'
+
+    cliente = row.get('Clientes')
+    return categorizar_divisao(cliente)
+
 def filtrar_por_mes(df, campo_data, mes, ano):
     df_aux_copy = df.copy()
-    if mes == '' or df.empty:
+    if mes == '' or df.empty or campo_data not in df.columns:
         return df
-    df_aux_copy[campo_data] = pd.to_datetime(df_aux_copy[campo_data], format="%d/%m/%Y")
-    return df[(df_aux_copy[campo_data].dt.month == int(mes)) & (df_aux_copy[campo_data].dt.year == int(ano))]
+    try:
+        df_aux_copy[campo_data] = pd.to_datetime(df_aux_copy[campo_data], errors='coerce', dayfirst=True)
+        return df[(df_aux_copy[campo_data].dt.month == int(mes)) & (df_aux_copy[campo_data].dt.year == int(ano))]
+    except Exception:
+        return df
 
 def filtrar_por_ytd(df, campo_data, mes, ano):
     df_aux_copy = df.copy()
-    if mes == '' or df.empty:
+    if mes == '' or df.empty or campo_data not in df.columns:
         return df
-    df_aux_copy[campo_data] = pd.to_datetime(df_aux_copy[campo_data], format="%d/%m/%Y", dayfirst=False)
-    return df[(df_aux_copy[campo_data].dt.month <= int(mes)) & (df_aux_copy[campo_data].dt.year == int(ano))]
+    try:
+        df_aux_copy[campo_data] = pd.to_datetime(df_aux_copy[campo_data], errors='coerce', dayfirst=True)
+        return df[(df_aux_copy[campo_data].dt.month <= int(mes)) & (df_aux_copy[campo_data].dt.year == int(ano))]
+    except Exception:
+        return df
 
 def get_visitas_por_divisao(df_rvt, mes, ano, ytd):
     if(ytd):
@@ -255,17 +329,47 @@ def get_qtd_quality(df_rvt, mes, ano, ytd):
     quality = defaultdict(int)
     cidades = {}
     indice = 0
+    
+    # Validar se coluna 'UnidadesBall' existe
+    tem_unidades_ball = 'UnidadesBall' in df_filtrado.columns
+
+    def normalizar_planta(valor):
+        if pd.isna(valor):
+            return None
+        planta = str(valor).strip()
+        if not planta or planta == "-":
+            return None
+        return planta
+
+    def listar_plantas(valor):
+        if pd.isna(valor):
+            return []
+        return [
+            planta
+            for planta in (normalizar_planta(item) for item in str(valor).split(";"))
+            if planta
+        ]
+
+    plantas_esperadas = {}
+    if tem_unidades_ball:
+        for unidade in df_filtrado['UnidadesBall']:
+            for planta in listar_plantas(unidade):
+                plantas_esperadas[planta.casefold()] = planta
+    
     for motivo in df_filtrado['Motivo']:
         if str(motivo).lower() == "quality review":
             div = categorizar_divisao(df_filtrado['Clientes'].iloc[indice]) #linha desse cliente
             if div == "planta_ball":
-                if(df_filtrado['UnidadesBall'].iloc[indice] not in cidades):
-                    cidades[df_filtrado['UnidadesBall'].iloc[indice]] = []
-                quality[div] +=1
-                cidades[df_filtrado['UnidadesBall'].iloc[indice]].append(df_filtrado['DataInicio'].iloc[indice])
-                #     cidades[df_filtrado['UnidadesBall'].iloc[indice]] = 0
-                # quality[div] +=1
-                # cidades[df_filtrado['UnidadesBall'].iloc[indice]] += 1
+                if tem_unidades_ball:
+                    unidade = df_filtrado['UnidadesBall'].iloc[indice]
+                    plantas_unidade = listar_plantas(unidade)
+                    quality[div] +=1
+                    for planta in plantas_unidade:
+                        if planta not in cidades:
+                            cidades[planta] = []
+                        cidades[planta].append(df_filtrado['DataInicio'].iloc[indice])
+                else:
+                    quality[div] += 1
             
             else: quality[div] +=1
         indice +=1
@@ -273,6 +377,36 @@ def get_qtd_quality(df_rvt, mes, ano, ytd):
     df_cidades_lista_datas = pd.DataFrame(list(cidades.items()), columns=['Plantas', 'Datas'])
     st.write(get_text("qr_plants_write"))
     st.dataframe(df_cidades_lista_datas, hide_index=True)
+
+    if plantas_esperadas:
+        plantas_com_qr = {
+            normalizar_planta(planta).casefold()
+            for planta in cidades.keys()
+            if normalizar_planta(planta)
+        }
+        plantas_sem_qr = [
+            planta
+            for chave, planta in sorted(plantas_esperadas.items(), key=lambda item: item[1])
+            if chave not in plantas_com_qr
+        ]
+
+        col_total, col_com_qr, col_sem_qr = st.columns(3)
+        with col_total:
+            st.metric("Plantas esperadas", len(plantas_esperadas))
+        with col_com_qr:
+            st.metric("Plantas com QR", len(plantas_com_qr))
+        with col_sem_qr:
+            st.metric("Plantas sem QR", len(plantas_sem_qr))
+
+        if plantas_sem_qr:
+            df_plantas_sem_qr = pd.DataFrame({
+                "Plantas sem Quality Review": plantas_sem_qr,
+                "Quantidade pendente": [1] * len(plantas_sem_qr)
+            })
+            st.write("Plantas do periodo selecionado que ainda nao fizeram Quality Review")
+            st.dataframe(df_plantas_sem_qr, hide_index=True)
+        else:
+            st.success("Todas as plantas esperadas fizeram Quality Review no periodo selecionado.")
     
     source = pd.DataFrame({
         "Categoria": quality.keys(),
@@ -320,8 +454,8 @@ def get_qtd_quality(df_rvt, mes, ano, ytd):
         st.info(get_text("qr_afternoon_chart_info"))
 
 def get_incidentes_por_divisao(df_noc, mes, ano):
-    divisoes = st.session_state.dados_carregados.get('divisoes')
-    df_cop = st.session_state.dados_carregados.get('df_cop')
+    divisoes = get_divisoes_incidentes()
+    df_cop = st.session_state.dados_carregados.get('df_cop') or {}
     incidentes_anteriores = {}
     popnoc = {}
     allnocs = []
@@ -336,21 +470,20 @@ def get_incidentes_por_divisao(df_noc, mes, ano):
             if(dict_meses[mes_anteriores] not in incidentes_anteriores[div]):
                 incidentes_anteriores[div][dict_meses[mes_anteriores]] = 0
         for cliente in df_filtrado['Clientes']:
-            
-            if str(cliente).lower() in df_cop['copacker']:
-                for divisao in df_cop.keys():
-                    
-                    for rotulo in df_cop[divisao]:
-                        if rotulo.upper() in df_filtrado["Rotulo do Produto"].iloc[indice]:
-                            # st.write(df_filtrado["Rotulo do Produto"].iloc[indice])
-                            div = divisao
-                            ignorar.append(cliente)
-                            popnoc[div].append(df_filtrado["Numero NOC"].iloc[indice].astype(int))
-                            allnocs.append(df_filtrado["Numero NOC"].iloc[indice].astype(int))
-                            break
-                
-            if(cliente not in ignorar):
-                div = categorizar_divisao(cliente)
+            row = df_filtrado.iloc[indice]
+            div = categorizar_incidente(row, df_cop)
+            if div not in incidentes_anteriores:
+                incidentes_anteriores[div] = {}
+                popnoc[div] = []
+            if dict_meses[mes_anteriores] not in incidentes_anteriores[div]:
+                incidentes_anteriores[div][dict_meses[mes_anteriores]] = 0
+            if div == 'monster':
+                allnocs.append(row["Numero NOC"].astype(int))
+            elif str(cliente).lower() in df_cop.get('copacker', []):
+                ignorar.append(cliente)
+                popnoc[div].append(row["Numero NOC"].astype(int))
+                allnocs.append(row["Numero NOC"].astype(int))
+
             if(df_filtrado['Status'].iloc[indice] != 'CANCELADA' and (pd.isna(cliente) == 0) and div != "outros"):
                 incidentes_anteriores[div][dict_meses[mes_anteriores]] += 1
             indice += 1
@@ -359,19 +492,22 @@ def get_incidentes_por_divisao(df_noc, mes, ano):
     col1, col2, col3 = st.columns(3)
     colu1, colu2, colu3 = st.columns(3)
     with col1:
-        ka = st.selectbox("selecione um key account", options=[coluna for coluna in incidentes_anteriores.keys() if coluna not in ['planta_ball','outros', 'argentina', 'chile', 'paraguai', 'bolivia', 'peru', 'copacker']])
+        ka = st.selectbox("selecione um key account", options=[coluna for coluna in incidentes_anteriores.keys() if coluna not in EXCLUDED_KA_OPTIONS])
           
     st.write(get_text("evaluate_incidents_write"))
     st.subheader("Clientes Regulares")
     for mes_anteriores in range(1, mes+1):
         df_filtrado = filtrar_por_mes(df_noc, 'DataRecebimentoSAC', mes_anteriores, ano)
-        clientes_permitidos = [str(cliente).lower() for cliente in divisoes[ka]]
-    
-        mascara_filtragem = df_filtrado['Clientes'].str.lower().isin(clientes_permitidos)
-        
         st.write(f"Incidentes - {ka} - {mes_anteriores}/{ano}")
-        df_filtrado_2 = df_filtrado[mascara_filtragem]
+        if ka == 'monster':
+            df_filtrado_2 = df_filtrado[df_filtrado.apply(lambda row: is_monster_incidente(row) or is_monster_copacker_incidente(row), axis=1)]
+        else:
+            clientes_permitidos = [str(cliente).lower() for cliente in divisoes[ka]]
+            mascara_filtragem = df_filtrado['Clientes'].str.lower().isin(clientes_permitidos)
+            df_filtrado_2 = df_filtrado[mascara_filtragem]
         df_filtrado_1 = df_filtrado_2[~df_filtrado["Numero NOC"].astype(int).isin(allnocs)]
+        if ka == 'monster':
+            df_filtrado_1 = df_filtrado_2
         df_filtrado_3 = df_filtrado_1[df_filtrado_1["Status"] != "CANCELADA"]
         
         st.dataframe(df_filtrado_3, column_order=["Numero NOC", "DataRecebimentoSAC", "Clientes", "Defeito", "Planta"], hide_index=True)
@@ -466,37 +602,56 @@ def get_incidentes_por_divisao(df_noc, mes, ano):
 
 def get_time_for_each_level(mes, ano, db, df_noc, coluna_data, tipo_retorno, tempo_resposta_niveis):
     
+    # Validar se coluna 'Status' existe
+    if 'Status' not in db.columns or coluna_data not in db.columns or 'Numero NOC' not in db.columns:
+        st.warning(f"Colunas obrigatórias faltando em {db}. Esperado: Status, {coluna_data}, Numero NOC")
+        return
+    
     df_filtrado = filtrar_por_mes(db, coluna_data, mes, ano)
-    df_filtrado_can = df_filtrado[df_filtrado['Status'] != 'CANCELADA']
+    if df_filtrado.empty:
+        return
+    
     indice = 0
     for data in df_filtrado[coluna_data]:
-        if(df_filtrado['Status'].iloc[indice] != 'CANCELADA'):
-            noc_na_data = df_filtrado['Numero NOC'].iloc[indice]
-            if(noc_na_data):
-                df_noc['Numero NOC'] = pd.to_numeric(df_noc['Numero NOC'], errors='coerce')
-                noc_a_buscar = pd.to_numeric(noc_na_data, errors='coerce')
-                df_filtro_noc = df_noc[df_noc['Numero NOC'] == noc_a_buscar]
-                if not df_filtro_noc.empty:
-                    data_sac = df_filtro_noc['DataRecebimentoSAC'].iloc[0]
-                    data_sac = datetime.strptime(str(data_sac), '%d/%m/%Y').date()
-                    formatos = ['%Y/%m/%d %H:%M:%S', '%Y-%m-%d %H:%M:%S', '%d/%m/%Y', "%d/%m/%Y %H:%M:%S"]
-                    for fmt in formatos:
+        try:
+            if(df_filtrado['Status'].iloc[indice] != 'CANCELADA'):
+                noc_na_data = df_filtrado['Numero NOC'].iloc[indice]
+                if pd.notna(noc_na_data):
+                    # Validar coluna DataRecebimentoSAC antes de usar
+                    if 'DataRecebimentoSAC' not in df_noc.columns:
+                        indice += 1
+                        continue
+                    
+                    noc_a_buscar = str(noc_na_data).strip()
+                    df_filtro_noc = df_noc[df_noc['Numero NOC'].astype(str) == noc_a_buscar]
+                    if not df_filtro_noc.empty:
                         try:
-                            data = datetime.strptime(str(data), fmt).date()
-                            break
-                        except ValueError:
+                            data_sac = df_filtro_noc['DataRecebimentoSAC'].iloc[0]
+                            data_sac = datetime.strptime(str(data_sac), '%d/%m/%Y').date()
+                            formatos = ['%Y/%m/%d %H:%M:%S', '%Y-%m-%d %H:%M:%S', '%d/%m/%Y', "%d/%m/%Y %H:%M:%S"]
+                            data_convertida = None
+                            for fmt in formatos:
+                                try:
+                                    data_convertida = datetime.strptime(str(data), fmt).date()
+                                    break
+                                except ValueError:
+                                    pass
+                            
+                            if data_convertida:
+                                diferenca = data_convertida - data_sac
+                                diferenca = diferenca.days
+                                tempo_resposta_niveis[tipo_retorno]['acumulado'] += diferenca
+                                tempo_resposta_niveis[tipo_retorno]['qtd'] += 1
+                        except Exception as e:
                             pass
                     
-                    diferenca = data - data_sac
-                    diferenca = diferenca.days
-                    tempo_resposta_niveis[tipo_retorno]['acumulado'] += diferenca
-                    tempo_resposta_niveis[tipo_retorno]['qtd'] += 1
-                
-                else:
-                    if(str(noc_na_data) not in nocs_nao_cadastradas):
-                        nocs_nao_cadastradas.append(str(noc_na_data))
-                    
-            indice += 1
+                    else:
+                        if(str(noc_na_data) not in nocs_nao_cadastradas):
+                            nocs_nao_cadastradas.append(str(noc_na_data))
+        except Exception as e:
+            pass
+        
+        indice += 1
                
 def get_rvt_by_person(df_rvt, mes, ano, ytd):
     df_time = st.session_state.dados_carregados.get('df_time')
@@ -731,8 +886,8 @@ def get_tempo_rvt(df_filtro):
         st.metric("Média de Tempo de 1º Contato RVT Corretivo", media_dias)
 
 def get_incidentes_nps(df_noc, mes, ano, ka, planta):
-    divisoes = st.session_state.dados_carregados.get('divisoes')
-    df_cop = st.session_state.dados_carregados.get('df_cop')
+    divisoes = get_divisoes_incidentes()
+    df_cop = st.session_state.dados_carregados.get('df_cop') or {}
     incidentes_anteriores = {}
     popnoc = {}
     allnocs = []
@@ -748,21 +903,20 @@ def get_incidentes_nps(df_noc, mes, ano, ka, planta):
                 if(dict_meses[mes_anteriores] not in incidentes_anteriores[div]):
                     incidentes_anteriores[div][dict_meses[mes_anteriores]] = 0
             for cliente in df_filtrado['Clientes']:
-                
-                if str(cliente).lower() in df_cop['copacker']:
-                    for divisao in df_cop.keys():
-                        
-                        for rotulo in df_cop[divisao]:
-                            if rotulo.upper() in df_filtrado["Rotulo do Produto"].iloc[indice]:
+                row = df_filtrado.iloc[indice]
+                div = categorizar_incidente(row, df_cop)
+                if div not in incidentes_anteriores:
+                    incidentes_anteriores[div] = {}
+                    popnoc[div] = []
+                if dict_meses[mes_anteriores] not in incidentes_anteriores[div]:
+                    incidentes_anteriores[div][dict_meses[mes_anteriores]] = 0
+                if div == 'monster':
+                    allnocs.append(row["Numero NOC"].astype(int))
+                elif str(cliente).lower() in df_cop.get('copacker', []):
+                    ignorar.append(cliente)
+                    popnoc[div].append(row["Numero NOC"].astype(int))
+                    allnocs.append(row["Numero NOC"].astype(int))
 
-                                div = divisao
-                                ignorar.append(cliente)
-                                popnoc[div].append(df_filtrado["Numero NOC"].iloc[indice].astype(int))
-                                allnocs.append(df_filtrado["Numero NOC"].iloc[indice].astype(int))
-                                break
-                    
-                if(cliente not in ignorar):
-                    div = categorizar_divisao(cliente)
                 if(df_filtrado['Status'].iloc[indice] != 'CANCELADA' and (pd.isna(cliente) == 0) and div != "outros"):
                     incidentes_anteriores[div][dict_meses[mes_anteriores]] += 1
                 indice += 1
@@ -842,6 +996,238 @@ def get_qtd_latas_tampas(df_noc, mes, ano, ka, planta):
     
     chart_display = base_display.mark_bar() + base_display.mark_text(align='left', dx=3, color='#000000', fontSize=14)
     st.altair_chart(chart_display.configure(background='#ffffff00'), use_container_width=True)
+
+
+def normalize_nps_sheet(df):
+    """Tenta normalizar nomes de colunas de uma planilha NPS para os nomes esperados.
+    Retorna uma cópia do DataFrame com colunas renomeadas quando possível."""
+    df = pd.DataFrame(df)
+    cols = list(df.columns)
+    lower_map = {c: c.lower().strip() for c in cols}
+
+    # mapeamento de palavras-chaves para colunas padrão
+    keywords = {
+        'Numero NOC': ['numero noc', 'numero_noc', 'nº noc', 'noc', 'num noc'],
+        'DataRecebimentoSAC': ['datarecebimento', 'data receb', 'data recebimento', 'data'],
+        'Clientes': ['cliente', 'clientes', 'ka', 'key account'],
+        'Rotulo do Produto': ['rotulo', 'rótulo', 'rotulo do produto', 'produto', 'produto rotulo'],
+        'Planta': ['planta', 'plant'],
+        'Status': ['status', 'situacao', 'situação'],
+        'Tipo do Produto': ['tipo do produto', 'tipo produto', 'tipo'],
+        'Parecer': ['parecer', 'conclusao', 'conclusão'],
+        'Tratativa Final': ['tratativa', 'tratativa final', 'final'],
+        'NPS_Score': ['nps', 'satisfacao', 'satisfação', 'score']
+    }
+
+    rename_map = {}
+    # First pass: exact keyword containment
+    for target, kws in keywords.items():
+        for col, low in lower_map.items():
+            for kw in kws:
+                if kw in low:
+                    rename_map[col] = target
+                    break
+            if col in rename_map:
+                break
+
+    # Second pass: fuzzy matching for targets not found yet
+    unmapped_targets = [t for t in keywords.keys() if t not in rename_map.values()]
+    if unmapped_targets:
+        # prepare lowercase column list
+        cols_lower = [low for low in lower_map.values()]
+        cols_orig = list(lower_map.keys())
+        for target in unmapped_targets:
+            # try matching target name itself
+            candidate = difflib.get_close_matches(target.lower(), cols_lower, n=1, cutoff=0.6)
+            if not candidate:
+                # try matching against the keywords for that target
+                kws = keywords.get(target, [])
+                for kw in kws:
+                    candidate = difflib.get_close_matches(kw, cols_lower, n=1, cutoff=0.6)
+                    if candidate:
+                        break
+            if candidate:
+                # map back to original column name
+                idx = cols_lower.index(candidate[0])
+                orig_col = cols_orig[idx]
+                if orig_col not in rename_map:
+                    rename_map[orig_col] = target
+
+    if rename_map:
+        df = df.rename(columns=rename_map)
+        try:
+            st.session_state['nps_last_mapping'] = rename_map
+        except Exception:
+            pass
+
+    return df
+
+
+def build_nps_charts(df, palette=None):
+    """Gera um dicionário de gráficos (Altair) e tabelas a partir do DataFrame NPS normalizado."""
+    charts = {}
+    df = pd.DataFrame(df)
+
+    # Converter datas quando disponíveis
+    if 'DataRecebimentoSAC' in df.columns:
+        try:
+            df['DataRecebimentoSAC_dt'] = pd.to_datetime(df['DataRecebimentoSAC'], errors='coerce', dayfirst=True)
+            df['MesAno'] = df['DataRecebimentoSAC_dt'].dt.to_period('M').astype(str)
+        except Exception:
+            df['MesAno'] = None
+    else:
+        df['MesAno'] = None
+
+    # default palette
+    default_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+    if palette is None:
+        palette = default_palette
+
+    # Gráfico 1: Latas x Tampas
+    if 'Tipo do Produto' in df.columns:
+        df_tipo = df['Tipo do Produto'].fillna('DESCONHECIDO').value_counts().reset_index()
+        df_tipo.columns = ['Tipo do Produto', 'Quantidade']
+        chart_tipo = alt.Chart(df_tipo).mark_bar().encode(
+            x=alt.X('Tipo do Produto:N', sort='-y'),
+            y='Quantidade:Q',
+            color=alt.Color('Tipo do Produto:N', scale=alt.Scale(range=palette)),
+            tooltip=['Tipo do Produto', 'Quantidade']
+        ).properties(title='Latas vs Tampas')
+        charts['latas_tampas'] = chart_tipo
+
+    # Gráfico 2: Parecer (pie)
+    if 'Parecer' in df.columns:
+        df_parecer = df['Parecer'].fillna('SEM PARECER').value_counts().reset_index()
+        df_parecer.columns = ['Parecer', 'Quantidade']
+        base = alt.Chart(df_parecer).encode(theta=alt.Theta('Quantidade', stack=True), color=alt.Color('Parecer:N'))
+        pie = base.mark_arc(innerRadius=50).encode(color=alt.Color('Parecer:N', scale=alt.Scale(range=palette))).properties(title='Parecer')
+        charts['parecer'] = pie
+
+    # Gráfico 3: Incidentes por mês
+    if df['MesAno'].notna().any():
+        df_time = df.groupby('MesAno').size().reset_index(name='Incidentes')
+        chart_time = alt.Chart(df_time).mark_line(point=True).encode(x='MesAno:T', y='Incidentes:Q', tooltip=['MesAno','Incidentes'], color=alt.value(palette[0])).properties(title='Incidentes por Mês')
+        charts['incidentes_tempo'] = chart_time
+
+    # Gráfico 4: NPS caso exista
+    if 'NPS_Score' in df.columns:
+        try:
+            scores = pd.to_numeric(df['NPS_Score'], errors='coerce')
+            promoters = ((scores >= 9) & (scores <= 10)).sum()
+            passives = ((scores >= 7) & (scores <= 8)).sum()
+            detractors = ((scores >= 0) & (scores <= 6)).sum()
+            total = promoters + passives + detractors
+            nps = round(((promoters - detractors) / total) * 100, 1) if total > 0 else None
+            df_nps = pd.DataFrame({'Categoria': ['Promoters','Passives','Detractors'], 'Quantidade':[promoters, passives, detractors]})
+            chart_nps = alt.Chart(df_nps).mark_bar().encode(x='Categoria:N', y='Quantidade:Q', color=alt.Color('Categoria:N', scale=alt.Scale(range=palette[:3])), tooltip=['Quantidade']).properties(title=f'NPS = {nps}')
+            charts['nps'] = chart_nps
+        except Exception:
+            pass
+
+    # Gráfico 5: Top Defeitos (top 10)
+    if 'Defeito' in df.columns:
+        df_def = df['Defeito'].dropna()
+        if not df_def.empty:
+            df_def_count = df_def.value_counts().reset_index()
+            df_def_count.columns = ['Defeito', 'Quantidade']
+            df_def_count = df_def_count.head(10)
+            chart_def = alt.Chart(df_def_count).mark_bar().encode(
+                x=alt.X('Quantidade:Q'),
+                y=alt.Y('Defeito:N', sort='-x'),
+                tooltip=['Defeito', 'Quantidade'],
+                color=alt.value(palette[0])
+            ).properties(title='Top Defeitos')
+            charts['top_defeitos'] = chart_def
+
+    # Gráfico 6: Incidentes por Planta
+    if 'Planta' in df.columns:
+        df_plt = df['Planta'].fillna('SEM_PLANTA')
+        if not df_plt.empty:
+            df_plt_count = df_plt.value_counts().reset_index()
+            df_plt_count.columns = ['Planta', 'Quantidade']
+            chart_planta = alt.Chart(df_plt_count).mark_bar().encode(
+                x=alt.X('Planta:N', sort='-y'),
+                y='Quantidade:Q',
+                tooltip=['Planta', 'Quantidade'],
+                color=alt.Color('Planta:N', scale=alt.Scale(range=palette))
+            ).properties(title='Incidentes por Planta')
+            charts['incidentes_planta'] = chart_planta
+
+    # Gráfico 7: Incidentes por Cliente (Top 10)
+    if 'Clientes' in df.columns:
+        df_cli = df['Clientes'].dropna()
+        if not df_cli.empty:
+            df_cli_count = df_cli.value_counts().reset_index()
+            df_cli_count.columns = ['Clientes', 'Quantidade']
+            df_cli_count = df_cli_count.head(10)
+            chart_clientes = alt.Chart(df_cli_count).mark_bar().encode(
+                x=alt.X('Quantidade:Q'),
+                y=alt.Y('Clientes:N', sort='-x'),
+                tooltip=['Clientes', 'Quantidade'],
+                color=alt.value(palette[1] if len(palette) > 1 else palette[0])
+            ).properties(title='Top Clientes (Incidentes)')
+            charts['top_clientes'] = chart_clientes
+
+    # Gráfico 8: NPS por KA (usa categorizar_divisao)
+    if 'NPS_Score' in df.columns and 'Clientes' in df.columns:
+        try:
+            df_tmp = df[['Clientes', 'NPS_Score']].copy()
+            df_tmp['NPS_Score'] = pd.to_numeric(df_tmp['NPS_Score'], errors='coerce')
+            df_tmp = df_tmp.dropna(subset=['Clientes'])
+            if not df_tmp.empty:
+                df_tmp['KA'] = df_tmp['Clientes'].apply(lambda x: categorizar_divisao(x) if pd.notna(x) else 'outros')
+                def calc_nps(s):
+                    s = pd.to_numeric(s.dropna(), errors='coerce')
+                    total = s.count()
+                    if total == 0:
+                        return None
+                    promoters = (s >= 9).sum()
+                    detractors = (s <= 6).sum()
+                    return round(((promoters - detractors) / total) * 100, 1)
+                df_nps_ka = df_tmp.groupby('KA')['NPS_Score'].apply(calc_nps).reset_index(name='NPS')
+                df_nps_ka = df_nps_ka.dropna()
+                if not df_nps_ka.empty:
+                    chart_nps_ka = alt.Chart(df_nps_ka).mark_bar().encode(
+                        x=alt.X('NPS:Q'),
+                        y=alt.Y('KA:N', sort='-x'),
+                        tooltip=['KA', 'NPS'],
+                        color=alt.value(palette[2] if len(palette) > 2 else palette[0])
+                    ).properties(title='NPS por KA')
+                    charts['nps_ka'] = chart_nps_ka
+        except Exception:
+            pass
+
+    # Gráfico 9: Parecer por Planta (stacked)
+    if 'Parecer' in df.columns and 'Planta' in df.columns:
+        try:
+            df_pp = df.dropna(subset=['Planta', 'Parecer'])
+            if not df_pp.empty:
+                df_pp_count = df_pp.groupby(['Planta', 'Parecer']).size().reset_index(name='Quantidade')
+                chart_parecer_planta = alt.Chart(df_pp_count).mark_bar().encode(
+                    x=alt.X('Planta:N', sort='-y'),
+                    y='Quantidade:Q',
+                    color=alt.Color('Parecer:N', scale=alt.Scale(range=palette)),
+                    tooltip=['Planta', 'Parecer', 'Quantidade']
+                ).properties(title='Parecer por Planta')
+                charts['parecer_planta'] = chart_parecer_planta
+        except Exception:
+            pass
+
+    # Gráfico 10: Distribuição de Tratativa Final
+    if 'Tratativa Final' in df.columns:
+        df_tf = df['Tratativa Final'].fillna('SEM_TRATATIVA')
+        if not df_tf.empty:
+            df_tf_count = df_tf.value_counts().reset_index()
+            df_tf_count.columns = ['Tratativa', 'Quantidade']
+            chart_trat = alt.Chart(df_tf_count).mark_arc(innerRadius=20).encode(
+                theta=alt.Theta('Quantidade:Q', stack=True),
+                color=alt.Color('Tratativa:N', scale=alt.Scale(range=palette)),
+                tooltip=['Tratativa', 'Quantidade']
+            ).properties(title='Distribuição de Tratativa Final')
+            charts['tratativa_final'] = chart_trat
+    
+
+    return charts
     
 def get_qtd_parecer(df_noc, mes, ano, ka, planta):
     divisoes = st.session_state.dados_carregados.get('divisoes')
@@ -1034,7 +1420,7 @@ def get_qtd_defeitos(df_noc, mes, ano, ka, parecer, planta):
     
     base_display = alt.Chart(df_source).encode(
         x=alt.X('Quantidade', title='Quantidade', scale=alt.Scale(nice=True)),
-        y=alt.Y('Defeito:N', axis=alt.Axis(
+        y=alt.Y('Defeito:N', sort='-x', axis=alt.Axis(
             labelLimit=600,
             labelFontSize=14,
             titleFontSize=16,
@@ -1045,7 +1431,7 @@ def get_qtd_defeitos(df_noc, mes, ano, ka, parecer, planta):
             titleAnchor='start',# 3. Define o ponto de "âncora" do texto no início
             titleY=-20,         # 4. Move o título para CIMA (valores negativos)
             titleX=0            # 5. Ajusta na horizontal (0 geralmente funciona bem)
-        )).sort('-x'),
+        )),
         color=alt.Color('Defeito',
                   scale=alt.Scale(range=['blue']), # Define sua paleta de cores aqui
                   legend=None # Opcional: remove a legenda de cores se for redundante
@@ -1104,7 +1490,7 @@ def get_qtd_incidentes_planta(df_noc, mes, ano, ka, planta):
     
     base_display = alt.Chart(df_source).encode(
         x=alt.X('Quantidade', title='Quantidade', scale=alt.Scale(nice=True)),
-        y=alt.Y('Planta:N', axis=alt.Axis(
+        y=alt.Y('Planta:N', sort='-x', axis=alt.Axis(
             labelLimit=600,
             labelFontSize=14,
             titleFontSize=16,
@@ -1115,7 +1501,7 @@ def get_qtd_incidentes_planta(df_noc, mes, ano, ka, planta):
             titleAnchor='start',# 3. Define o ponto de "âncora" do texto no início
             titleY=-20,         # 4. Move o título para CIMA (valores negativos)
             titleX=0 
-        )).sort('-x'),
+        )),
         color=alt.Color('Planta',
                   scale=alt.Scale(range=['blue']), # Define sua paleta de cores aqui
                   legend=None # Opcional: remove a legenda de cores se for redundante
@@ -1158,7 +1544,7 @@ def get_qtd_clientes(df_noc, mes, ano, ka, planta):
     
     base_display = alt.Chart(df_source).encode(
         x=alt.X('Quantidade', title='Quantidade', scale=alt.Scale(nice=True)),
-        y=alt.Y('Clientes:N', axis=alt.Axis(
+        y=alt.Y('Clientes:N', sort='-x', axis=alt.Axis(
             labelLimit=600,
             labelFontSize=14,
             titleFontSize=16,
@@ -1169,11 +1555,8 @@ def get_qtd_clientes(df_noc, mes, ano, ka, planta):
             titleAnchor='start',# 3. Define o ponto de "âncora" do texto no início
             titleY=-20,         # 4. Move o título para CIMA (valores negativos)
             titleX=0            # 5. Ajusta na horizontal (0 geralmente funciona bem)
-        )).sort('-x'),
-        color=alt.Color('Clientes',
-                  scale=alt.Scale(range=['blue']), # Define sua paleta de cores aqui
-                  legend=None # Opcional: remove a legenda de cores se for redundante
-                 ),
+        )),
+        color=alt.Color('Clientes', scale=alt.Scale(range=['blue']), legend=None),
                  
     text='Quantidade'
     ).properties(
@@ -1190,39 +1573,97 @@ def get_qtd_ressarce(df_r_brasil, df_d_brasil, mes, ano, ka):
     vet_ressarce = [0,0,0,0,0,0]
 
     df_aux_copy = df_r_brasil.copy()
-    df_aux_copy['DataCriacao'] = pd.to_datetime(df_aux_copy['DataCriacao'], format="%d/%m/%Y", dayfirst=True)
+    # validar existência da coluna de data e converter de forma tolerante
+    if 'DataCriacao' in df_aux_copy.columns:
+        df_aux_copy['DataCriacao_dt'] = pd.to_datetime(df_aux_copy['DataCriacao'], errors='coerce', dayfirst=True)
+    else:
+        df_aux_copy['DataCriacao_dt'] = pd.NaT
 
-    df_filtrado_r = df_r_brasil[(df_aux_copy['DataCriacao'].dt.month <= int(mes)) & (df_aux_copy['DataCriacao'].dt.year == int(ano))]
-    df_filtrado_n = df_filtrado_r[df_filtrado_r['Status'] != 'CANCELADA']
+    # filtrar por mês/ano com segurança
+    try:
+        mes_i = int(mes)
+        ano_i = int(ano)
+        df_filtrado_r = df_aux_copy[(df_aux_copy['DataCriacao_dt'].dt.month <= mes_i) & (df_aux_copy['DataCriacao_dt'].dt.year == ano_i)]
+    except Exception:
+        df_filtrado_r = df_aux_copy.copy()
+
+    df_filtrado_n = df_filtrado_r[df_filtrado_r.get('Status', '') != 'CANCELADA']
     
     if ka != 'todos':
-        clientes_permitidos1 = [str(cliente).lower() for cliente in divisoes[ka]]
-        clientes_permitidos = [str(cliente).lower() for cliente in clientes_permitidos1 if cliente not in df_cop['copacker']]
-    
-        mascara_filtragem = df_filtrado_n['Cliente'].fillna('').str.strip().str.lower().isin(clientes_permitidos)
-        df_filtrado_cliente = df_filtrado_n[mascara_filtragem]        
-        
-        df_filtrado_lata = df_filtrado_cliente[df_filtrado_cliente['Rótulo'].str.contains("LATA|LT", case=False, na=False, regex=True)]
-        vet_ressarce[1] = len(df_filtrado_lata['Cliente'])
-        vet_ressarce[2] = sum(df_filtrado_lata['Dolar'].fillna(0))
+        clientes_permitidos1 = [str(cliente).lower() for cliente in divisoes.get(ka, [])]
+        # proteger df_cop
+        cop_list = df_cop.get('copacker') if isinstance(df_cop, dict) and 'copacker' in df_cop else []
+        clientes_permitidos = [str(cliente).lower() for cliente in clientes_permitidos1 if cliente not in cop_list]
 
-        df_filtrado_tampa = df_filtrado_cliente[df_filtrado_cliente['Rótulo'].str.contains("TAMPA|TP", case=False, na=False, regex=True)]
-        vet_ressarce[4] = len(df_filtrado_tampa['Cliente'])
-        vet_ressarce[5] = df_filtrado_tampa['Dolar'].sum()
+        # resolver nomes de coluna variantes
+        cliente_col = 'Cliente' if 'Cliente' in df_filtrado_n.columns else ('Clientes' if 'Clientes' in df_filtrado_n.columns else None)
+        rotulo_col = None
+        for c in ['Rótulo', 'Rotulo', 'Rotulo do Produto', 'Rotulo do Produto']:
+            if c in df_filtrado_n.columns:
+                rotulo_col = c
+                break
+        dolar_col = None
+        for c in ['Dolar', 'Dólar', 'Valor', 'Valor USD']:
+            if c in df_filtrado_n.columns:
+                dolar_col = c
+                break
+
+        if cliente_col is not None:
+            clientes_series = df_filtrado_n[cliente_col].fillna('').astype(str).str.strip().str.lower()
+            mascara_filtragem = clientes_series.isin(clientes_permitidos)
+            df_filtrado_cliente = df_filtrado_n[mascara_filtragem]
+
+            # filtrar por rótulo (lata/tampa)
+            if rotulo_col is not None:
+                rotulo_series = df_filtrado_cliente[rotulo_col].fillna('').astype(str)
+                df_filtrado_lata = df_filtrado_cliente[rotulo_series.str.contains(r"LATA|LT", case=False, na=False, regex=True)]
+                df_filtrado_tampa = df_filtrado_cliente[rotulo_series.str.contains(r"TAMPA|TP", case=False, na=False, regex=True)]
+            else:
+                df_filtrado_lata = df_filtrado_cliente.iloc[0:0]
+                df_filtrado_tampa = df_filtrado_cliente.iloc[0:0]
+
+            vet_ressarce[1] = len(df_filtrado_lata[cliente_col])
+            if dolar_col is not None:
+                vet_ressarce[2] = pd.to_numeric(df_filtrado_lata[dolar_col].fillna(0), errors='coerce').sum()
+            else:
+                vet_ressarce[2] = 0
+
+            vet_ressarce[4] = len(df_filtrado_tampa[cliente_col])
+            if dolar_col is not None:
+                vet_ressarce[5] = pd.to_numeric(df_filtrado_tampa[dolar_col].fillna(0), errors='coerce').sum()
+            else:
+                vet_ressarce[5] = 0
 
     df_filtrado_d = filtrar_por_ytd(df_d_brasil, 'DataCriacao', mes, ano)
-    df_filtrado_n = df_filtrado_d[df_filtrado_d['Status'] != 'CANCELADA']
-    
-    if ka != 'todos':
-        clientes_permitidos1 = [str(cliente).lower() for cliente in divisoes[ka]]
-        clientes_permitidos = [str(cliente).lower() for cliente in clientes_permitidos1 if cliente not in df_cop['copacker']]
-        mascara_filtragem = df_filtrado_n['Cliente'].str.strip().str.lower().isin(clientes_permitidos)
-        df_filtrado_cliente = df_filtrado_n[mascara_filtragem]        
-        df_filtrado_lata = df_filtrado_cliente[df_filtrado_cliente['Rótulo'].str.contains("LATA|LT", case=False, na=False, regex=True)]
-        vet_ressarce[0] = len(df_filtrado_lata['Cliente'])
+    df_filtrado_n = df_filtrado_d[df_filtrado_d.get('Status', '') != 'CANCELADA']
 
-        df_filtrado_tampa = df_filtrado_cliente[df_filtrado_cliente['Rótulo'].str.contains("TAMPA|TP", case=False, na=False, regex=True)]
-        vet_ressarce[3] = len(df_filtrado_tampa['Cliente'])
+    if ka != 'todos':
+        clientes_permitidos1 = [str(cliente).lower() for cliente in divisoes.get(ka, [])]
+        cop_list = df_cop.get('copacker') if isinstance(df_cop, dict) and 'copacker' in df_cop else []
+        clientes_permitidos = [str(cliente).lower() for cliente in clientes_permitidos1 if cliente not in cop_list]
+
+        cliente_col = 'Cliente' if 'Cliente' in df_filtrado_n.columns else ('Clientes' if 'Clientes' in df_filtrado_n.columns else None)
+        rotulo_col = None
+        for c in ['Rótulo', 'Rotulo', 'Rotulo do Produto', 'Rotulo do Produto']:
+            if c in df_filtrado_n.columns:
+                rotulo_col = c
+                break
+
+        if cliente_col is not None:
+            clientes_series = df_filtrado_n[cliente_col].fillna('').astype(str).str.strip().str.lower()
+            mascara_filtragem = clientes_series.isin(clientes_permitidos)
+            df_filtrado_cliente = df_filtrado_n[mascara_filtragem]
+
+            if rotulo_col is not None:
+                rotulo_series = df_filtrado_cliente[rotulo_col].fillna('').astype(str)
+                df_filtrado_lata = df_filtrado_cliente[rotulo_series.str.contains(r"LATA|LT", case=False, na=False, regex=True)]
+                df_filtrado_tampa = df_filtrado_cliente[rotulo_series.str.contains(r"TAMPA|TP", case=False, na=False, regex=True)]
+            else:
+                df_filtrado_lata = df_filtrado_cliente.iloc[0:0]
+                df_filtrado_tampa = df_filtrado_cliente.iloc[0:0]
+
+            vet_ressarce[0] = len(df_filtrado_lata[cliente_col])
+            vet_ressarce[3] = len(df_filtrado_tampa[cliente_col])
     
     return vet_ressarce
 

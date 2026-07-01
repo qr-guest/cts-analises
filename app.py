@@ -9,8 +9,138 @@ from textwrap import wrap
 
 load_dotenv()
 
-from service.functions import menu_mensal, filtrar_por_mes, filtrar_por_ytd, get_incidentes_por_divisao, get_qtd_quality, get_qtd_treinamentos, get_rvt_by_person, get_tempo_resposta, get_time_for_each_level, get_tipos_visitas_rvt, get_visitas_por_divisao, nocs_nao_cadastradas, load_translation, get_text, get_flow, get_tempo_rvt, get_incidentes_nps, get_qtd_latas_tampas, get_qtd_parecer, get_qtd_tratativa, get_qtd_defeitos, get_qtd_incidentes_planta, get_qtd_clientes, get_qtd_ressarce
+from service.functions import menu_mensal, filtrar_por_mes, filtrar_por_ytd, get_incidentes_por_divisao, get_qtd_quality, get_qtd_treinamentos, get_rvt_by_person, get_tempo_resposta, get_time_for_each_level, get_tipos_visitas_rvt, get_visitas_por_divisao, nocs_nao_cadastradas, load_translation, get_text, get_flow, get_tempo_rvt, get_incidentes_nps, get_qtd_latas_tampas, get_qtd_parecer, get_qtd_tratativa, get_qtd_defeitos, get_qtd_incidentes_planta, get_qtd_clientes, get_qtd_ressarce, normalize_nps_sheet, build_nps_charts
 from service.connections import processar_arquivos_carregados
+from service.analistas import render_analistas_dashboard
+from service.metas import render_metas_dashboard
+from service.onsite import render_onsite_dashboard
+try:
+    import vl_convert as vlc
+except Exception:
+    vlc = None
+
+EXPECTED_UPLOAD_FILES = [
+    "CTS.xlsx",
+    "Clientes.xlsx",
+    "Conexoes_NOC_RVT.xlsx",
+    "Conexoes_RessarceBall.xlsx",
+]
+
+
+def app_debug_enabled():
+    return os.getenv("APP_DEBUG", "").strip().lower() in {"1", "true", "yes", "sim"}
+
+
+def render_upload_status(uploaded_files):
+    uploaded_names = {file.name for file in uploaded_files or []}
+    loaded_count = sum(file_name in uploaded_names for file_name in EXPECTED_UPLOAD_FILES)
+    missing_files = [file_name for file_name in EXPECTED_UPLOAD_FILES if file_name not in uploaded_names]
+
+    st.markdown("### Arquivos obrigatorios")
+    st.progress(loaded_count / len(EXPECTED_UPLOAD_FILES), text=f"{loaded_count} de {len(EXPECTED_UPLOAD_FILES)} arquivos selecionados")
+
+    cols = st.columns(4)
+    for index, file_name in enumerate(EXPECTED_UPLOAD_FILES):
+        is_loaded = file_name in uploaded_names
+        with cols[index]:
+            with st.container(border=True):
+                st.caption("Carregado" if is_loaded else "Pendente")
+                st.markdown(f"**{file_name}**")
+
+    if missing_files:
+        st.warning("Arquivos pendentes: " + ", ".join(missing_files))
+    elif len(uploaded_names) > len(EXPECTED_UPLOAD_FILES):
+        extra_files = sorted(uploaded_names - set(EXPECTED_UPLOAD_FILES))
+        st.info("Arquivos extras selecionados serao ignorados: " + ", ".join(extra_files))
+
+    return not missing_files
+
+
+def render_nps_upload():
+    with st.expander("Anexar planilha NPS", expanded=False):
+        st.write(
+            "Faça upload de uma planilha Excel ou CSV e mapeie as colunas "
+            "para os campos utilizados no painel NPS."
+        )
+        temp_file = st.file_uploader(
+            "Arquivo NPS",
+            type=["xlsx", "xls", "csv"],
+            key="temp_nps_upload",
+        )
+        if not temp_file:
+            return
+
+        try:
+            if str(temp_file.name).lower().endswith(".csv"):
+                df_temp = pd.read_csv(temp_file)
+            else:
+                xls = pd.ExcelFile(temp_file)
+                sheet = st.selectbox(
+                    "Selecione a aba",
+                    options=xls.sheet_names,
+                    key="temp_nps_sheet",
+                )
+                df_temp = pd.read_excel(temp_file, sheet_name=sheet)
+
+            st.write("Colunas detectadas:")
+            st.dataframe(
+                pd.DataFrame({"colunas": list(df_temp.columns)}),
+                hide_index=True,
+                width="stretch",
+            )
+
+            expected = [
+                ("Numero NOC", "Numero NOC"),
+                ("DataRecebimentoSAC", "DataRecebimentoSAC"),
+                ("Clientes", "Clientes"),
+                ("Rotulo do Produto", "Rotulo do Produto"),
+                ("Planta", "Planta"),
+                ("Status", "Status"),
+                ("Tipo do Produto", "Tipo do Produto"),
+                ("Parecer", "Parecer"),
+                ("Tratativa Final", "Tratativa Final"),
+            ]
+
+            mappings = {}
+            columns = ["(ignorar)"] + list(df_temp.columns)
+            for display_name, key in expected:
+                suggestion = next(
+                    (
+                        column
+                        for column in df_temp.columns
+                        if display_name.lower() in str(column).lower()
+                        or key.lower() in str(column).lower()
+                    ),
+                    None,
+                )
+                mappings[key] = st.selectbox(
+                    f"Mapear campo '{display_name}'",
+                    options=columns,
+                    index=columns.index(suggestion) if suggestion in columns else 0,
+                    key=f"temp_nps_mapping_{key}",
+                )
+
+            if st.button("Adicionar planilha ao NPS", key="add_temp_nps"):
+                normalized = pd.DataFrame()
+                for _, key in expected:
+                    selected = mappings.get(key)
+                    normalized[key] = (
+                        df_temp[selected]
+                        if selected and selected != "(ignorar)"
+                        else pd.NA
+                    )
+
+                normalized["DataRecebimentoSAC"] = pd.to_datetime(
+                    normalized["DataRecebimentoSAC"],
+                    errors="coerce",
+                    dayfirst=True,
+                ).dt.strftime("%d/%m/%Y")
+
+                st.session_state["df_noc_extra"] = normalized
+                st.success("Planilha adicionada ao painel NPS.")
+                st.dataframe(normalized.head(), hide_index=True, width="stretch")
+        except Exception as error:
+            st.error(f"Erro ao ler arquivo: {error}")
 
 
 def check_password():
@@ -57,16 +187,20 @@ if(login_inicio_c or login_inicio_g):
     )
 
     if 'dados_carregados' not in st.session_state:
-        st.header("1. Carregar Arquivos")
+        st.title("Quality Review")
+        st.caption("Carregue as bases para iniciar a analise mensal.")
         
         uploaded_files = st.file_uploader(
-            "Navegue até a pasta \\16 - SERVIÇO AO CLIENTE\\32. Conexoes, e selecione todos os arquivos",
+            "Selecione os arquivos Excel da pasta de conexoes",
             type=['xlsx'],
             accept_multiple_files=True
         )
         
-        if uploaded_files and len(uploaded_files) == 4:
-            dados = processar_arquivos_carregados(uploaded_files)
+        ready_to_process = render_upload_status(uploaded_files)
+
+        if uploaded_files and ready_to_process:
+            with st.spinner("Processando arquivos..."):
+                dados = processar_arquivos_carregados(uploaded_files)
             
             if dados:
                 st.session_state.dados_carregados = dados
@@ -89,6 +223,35 @@ if(login_inicio_c or login_inicio_g):
         df_cop = st.session_state.dados_carregados.get('df_cop')
         df_riscos = st.session_state.dados_carregados.get('riscos')
         df_melhorias = st.session_state.dados_carregados.get('melhorias') 
+
+        # Mesclar planilha NPS temporária, se existir
+        df_noc_combined = df_noc.copy() if df_noc is not None else pd.DataFrame()
+        if 'df_noc_extra' in st.session_state:
+            try:
+                extra = st.session_state.get('df_noc_extra')
+                if not extra.empty:
+                    df_noc_combined = pd.concat([df_noc_combined, extra], ignore_index=True, sort=False)
+            except Exception:
+                pass
+        # Painel de manutencao: aparece somente quando APP_DEBUG=true.
+        if app_debug_enabled():
+            with st.expander("Varredura de Colunas (debug)", expanded=False):
+                try:
+                    if st.button("Rodar varredura", key="rodar_varredura"):
+                        st.write("`df_noc_combined` shape:", df_noc_combined.shape)
+                        st.write("Colunas detectadas em df_noc_combined:")
+                        st.write(list(df_noc_combined.columns))
+                        st.dataframe(df_noc_combined.head())
+                        if 'df_noc_extra' in st.session_state:
+                            extra = st.session_state.get('df_noc_extra')
+                            st.write("`df_noc_extra` shape:", getattr(extra, 'shape', None))
+                            st.write("Colunas detectadas em df_noc_extra:")
+                            st.write(list(extra.columns) if hasattr(extra, 'columns') else [])
+                            st.dataframe(extra.head())
+                        st.write("Mapeamento automático salvo (st.session_state['nps_last_mapping']):")
+                        st.write(st.session_state.get('nps_last_mapping'))
+                except Exception as e:
+                    st.error(f"Erro na varredura: {e}")
        
         divisoes_pesquisa = {}
         
@@ -121,6 +284,16 @@ if(login_inicio_c or login_inicio_g):
         st.title(get_text("main_title"))
         st.write(get_text("app_intro"))
 
+        kpi_noc, kpi_rvt, kpi_rel, kpi_lang = st.columns(4)
+        with kpi_noc:
+            st.metric("NOCs", len(df_noc) if df_noc is not None else 0)
+        with kpi_rvt:
+            st.metric("RVTs", len(df_rvt) if df_rvt is not None else 0)
+        with kpi_rel:
+            st.metric("Relacoes NOC/RVT", len(df_consulta) if df_consulta is not None else 0)
+        with kpi_lang:
+            st.metric("Idioma", "ES" if st.session_state.get("language") == "es" else "PT")
+
         logo = str(os.getenv("logo"))
         ##st.logo(logo)
 
@@ -128,6 +301,7 @@ if(login_inicio_c or login_inicio_g):
             with st.sidebar:
                 menu_options_g = [
                     get_text("salesforce_section_title"), 
+                    get_text("analysts_section_title"),
                     get_text("ressarceball_section_title"), 
                     get_text("noc_rvt_relation_section_title"), 
                     get_text("search_noc_section_title"),
@@ -136,23 +310,29 @@ if(login_inicio_c or login_inicio_g):
                     get_text("response_time"),
                     get_text("riscos_melhorias"),
                     get_text("NPS"),  
+                    "Metas 2026",
+                    "On-Site | Perdas",
                     get_text("cts_managers_section_title")
                 ]
                 selecao_side_bar = option_menu(get_text("sidebar_menu_title"), menu_options_g, 
-                    icons=['cloud', 'coin', 'search', 'search', 'search', 'clock', 'clock', 'hammer', 'person', 'person', 'eye'], menu_icon="cast", default_index=0,
+                    icons=['cloud', 'bar-chart', 'coin', 'search', 'search', 'search', 'clock', 'clock', 'hammer', 'person', 'bullseye', 'truck', 'people'], menu_icon="cast", default_index=0,
                     styles={"nav-link-selected": {"background-color": "#093DC1"}})
         
         elif (login_inicio_c):
             with st.sidebar:
                 menu_options_c = [
+                    get_text("analysts_section_title"),
                     get_text("response_time"),
                     get_text("rvt_time"),
                 ]
                 selecao_side_bar = option_menu(get_text("sidebar_menu_title"), menu_options_c, 
-                    icons=['cloud', 'coin', 'search', 'search', 'search', 'clock', 'clock', 'hammer', 'person', 'person'], menu_icon="cast", default_index=0,
+                    icons=['bar-chart', 'clock', 'clock'], menu_icon="cast", default_index=0,
                     styles={"nav-link-selected": {"background-color": "#093DC1"}})
                 
-        if selecao_side_bar == get_text("salesforce_section_title"):
+        if selecao_side_bar == get_text("analysts_section_title"):
+            render_analistas_dashboard(df_noc, df_rvt)
+
+        elif selecao_side_bar == get_text("salesforce_section_title"):
             periodo = menu_mensal()
             mes = periodo[0]
             ano = periodo[1]
@@ -335,15 +515,19 @@ if(login_inicio_c or login_inicio_g):
                     if select_rn == "NOC": 
                         buscaNOC = st.text_input(get_text("type_noc_number_label"), placeholder=get_text("noc_placeholder"))
                         if(buscaNOC):
-                            linhas_noc = df_consulta.loc[df_consulta["Numero NOC"] == int(buscaNOC)]
-                            if(linhas_noc.empty):
-                                st.write(get_text("noc_has_no_rvt_write"))
-                                #buscar na tabela de noc
-                                linhas_noc = df_noc.loc[df_noc["Numero NOC"] == int(buscaNOC)]
+                            try:
+                                noc_num = int(buscaNOC)
+                                linhas_noc = df_consulta.loc[df_consulta["Numero NOC"] == noc_num]
                                 if(linhas_noc.empty):
-                                    st.write(get_text("noc_not_registered_write"))
-                                else:
-                                    st.dataframe(linhas_noc)
+                                    st.write(get_text("noc_has_no_rvt_write"))
+                                    #buscar na tabela de noc
+                                    linhas_noc = df_noc.loc[df_noc["Numero NOC"] == noc_num]
+                                    if(linhas_noc.empty):
+                                        st.write(get_text("noc_not_registered_write"))
+                                    else:
+                                        st.dataframe(linhas_noc)
+                            except ValueError:
+                                st.error("Por favor, digite um número válido para a NOC")
                             else:
                                 st.write(get_text("noc_found_write"))
                                 manter_col = ["NR (Relação NOC e RVT)", "Data Criação NR", "Numero NOC", "NOC.DataRecebimentoSAC", "NOC.DataCriacao", "Numero RVT", "Data Criação RVT"]
@@ -371,22 +555,32 @@ if(login_inicio_c or login_inicio_g):
                     st.subheader(get_text("search_noc_subheader"))
                     noc_pesquisada = st.text_input(get_text("noc_search_input_label"), placeholder=get_text("noc_search_input_placeholder"))
                     if(noc_pesquisada):
-                        for local, df_local in dfs_ressarceball.items():
-                            df_filtro_noc = df_local[df_local['Numero NOC'].astype(int) == int(noc_pesquisada)]
+                        try:
+                            noc_num = int(noc_pesquisada)
+                            for local, df_local in dfs_ressarceball.items():
+                                try:
+                                    df_filtro_noc = df_local[df_local['Numero NOC'].astype(int) == noc_num]
 
-                            if not df_filtro_noc.empty:
-                                st.write(local)
-                                df_sorted = df_filtro_noc.sort_values(by='ID', ascending=False)
-                                st.dataframe(df_sorted)
-                                get_flow(local, int(noc_pesquisada), df_sorted.iloc[0])
+                                    if not df_filtro_noc.empty:
+                                        st.write(local)
+                                        df_sorted = df_filtro_noc.sort_values(by='ID', ascending=False)
+                                        st.dataframe(df_sorted)
+                                        get_flow(local, noc_num, df_sorted.iloc[0])
+                                except Exception:
+                                    pass
 
-                        for local, df_local in dfs_salesforce.items():
-                            if local == 'NOCs Salesforce':
-                                df_filtro_noc = df_local[df_local['Numero NOC'].astype(int) == int(noc_pesquisada)]
-                            
-                                if not df_filtro_noc.empty:
-                                    st.write(local)
-                                    st.dataframe(df_filtro_noc)
+                            for local, df_local in dfs_salesforce.items():
+                                if local == 'NOCs Salesforce':
+                                    try:
+                                        df_filtro_noc = df_local[df_local['Numero NOC'].astype(int) == noc_num]
+                                    
+                                        if not df_filtro_noc.empty:
+                                            st.write(local)
+                                            st.dataframe(df_filtro_noc)
+                                    except Exception:
+                                        pass
+                        except ValueError:
+                            st.error("Por favor, digite um número válido para a NOC")
 
         elif selecao_side_bar == get_text("search_rvt_section_title"):
             buscaRVT = st.text_input(get_text("type_rvt_number_label"), placeholder=get_text("rvt_placeholder"))
@@ -655,6 +849,17 @@ if(login_inicio_c or login_inicio_g):
         elif selecao_side_bar == get_text("NPS"):
             
             st.info("Esta página permite avaliar o NPS, dados sobre a quantidade de reclamações de latas e tampas, parecer, tratativa e a relação entre clientes e defeitos/plantas")
+            render_nps_upload()
+
+            # Atualiza a base combinada imediatamente após um novo anexo.
+            df_noc_combined = df_noc.copy() if df_noc is not None else pd.DataFrame()
+            extra = st.session_state.get("df_noc_extra")
+            if isinstance(extra, pd.DataFrame) and not extra.empty:
+                df_noc_combined = pd.concat(
+                    [df_noc_combined, extra],
+                    ignore_index=True,
+                    sort=False,
+                )
             
             periodo = menu_mensal()
             mes = periodo[0]
@@ -664,10 +869,8 @@ if(login_inicio_c or login_inicio_g):
             options_ka.append("todos")
            
             plantas = set(list(df_noc['Planta'].fillna("-")))
-            plantas.remove("-")
-            plantas.remove('COMEX CORP EC')
-            # plantas.remove('LOGÍSTICA CORP EC')
-            plantas.remove('SANTA CRUZ')
+            plantas.difference_update({"-", "COMEX CORP EC", "LOGÍSTICA CORP EC", "SANTA CRUZ"})
+            plantas = sorted(plantas)
             
             on = st.toggle("KA ou Planta")
             if on:
@@ -681,20 +884,92 @@ if(login_inicio_c or login_inicio_g):
             with col1:
                 with st.container(border=True,height=340):
                     st.write("Latas x Tampas")
-                    get_incidentes_nps(df_noc, mes, ano, ka, planta)
+                    get_incidentes_nps(df_noc_combined, mes, ano, ka, planta)
         
             with col2:
                 with st.container(border=True):
                     st.write("Latas e Tampas")
-                    get_qtd_latas_tampas(df_noc, mes, ano, ka, planta)
+                    get_qtd_latas_tampas(df_noc_combined, mes, ano, ka, planta)
             with col3:
                 with st.container(border=True):
                     st.write("Parecer")
-                    get_qtd_parecer(df_noc, mes, ano, ka, planta)
+                    get_qtd_parecer(df_noc_combined, mes, ano, ka, planta)
             with col4:
                 with st.container(border=True):
                     st.write("Tratativa Final")
-                    get_qtd_tratativa(df_noc, mes, ano, ka, planta)
+                    get_qtd_tratativa(df_noc_combined, mes, ano, ka, planta)
+            # Gráficos adicionais importados da planilha NPS (se existir)
+            try:
+                has_extra = 'df_noc_extra' in st.session_state and isinstance(st.session_state.get('df_noc_extra'), pd.DataFrame) and not st.session_state.get('df_noc_extra').empty
+                source_options = ['Base NOC', 'Combinado (base + upload)']
+                if has_extra:
+                    source_options.insert(1, 'Upload temporário')
+                source_choice = st.radio('Fonte dos gráficos extraídos', options=source_options, horizontal=True)
+
+                if source_choice == 'Base NOC':
+                    df_for_nps = df_noc.copy() if df_noc is not None else pd.DataFrame()
+                elif source_choice == 'Upload temporário' and has_extra:
+                    df_for_nps = st.session_state.get('df_noc_extra').copy()
+                else:
+                    df_for_nps = df_noc_combined.copy()
+
+                df_nps_norm = normalize_nps_sheet(df_for_nps)
+
+                # Aplicar os mesmos filtros da aba NPS para evitar percepção de dados "mocados"
+                if 'DataRecebimentoSAC' in df_nps_norm.columns:
+                    df_nps_norm = filtrar_por_ytd(df_nps_norm, 'DataRecebimentoSAC', mes, ano)
+                if 'Status' in df_nps_norm.columns:
+                    df_nps_norm = df_nps_norm[df_nps_norm['Status'].fillna('') != 'CANCELADA']
+                if ka != 'todos' and 'Clientes' in df_nps_norm.columns:
+                    clientes_permitidos = [str(cliente).lower() for cliente in divisoes.get(ka, [])]
+                    df_nps_norm = df_nps_norm[df_nps_norm['Clientes'].fillna('').str.lower().isin(clientes_permitidos)]
+                if planta and 'Planta' in df_nps_norm.columns:
+                    df_nps_norm = df_nps_norm[df_nps_norm['Planta'].isin(planta)]
+
+                # escolha de paleta
+                paletas = {
+                    'Padrão': ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd'],
+                    'Azul': ['#0d47a1', '#1976d2', '#42a5f5', '#90caf9', '#e3f2fd'],
+                    'Vermelho/Verde': ['#2ca02c', '#d62728', '#ff7f0e']
+                }
+                pal_choice = st.selectbox('Paleta de cores para gráficos NPS', options=list(paletas.keys()), index=0)
+                palette = paletas[pal_choice]
+                charts = build_nps_charts(df_nps_norm, palette=palette)
+                if charts:
+                    st.subheader('Gráficos NPS (extraídos)')
+                    st.caption(f"Fonte dos dados: {source_choice} | Registros após filtro: {len(df_nps_norm)}")
+                    if 'NPS_Score' not in df_nps_norm.columns:
+                        st.info('A fonte selecionada não possui coluna de NPS (NPS_Score). O gráfico de NPS não será exibido.')
+                    # Exibir até 3 gráficos lado a lado
+                    cols_charts = st.columns(min(3, len(charts)))
+                    i = 0
+                    for key, chart in charts.items():
+                        try:
+                            with cols_charts[i % len(cols_charts)]:
+                                st.altair_chart(chart.configure(background='#ffffff00'), use_container_width=True)
+                                # botão de download (PNG) se vl_convert estiver disponível
+                                try:
+                                    if vlc is not None:
+                                        png = vlc.vegalite_to_png(chart.to_dict())
+                                        st.download_button(label=f"Download {key}.png", data=png, file_name=f"{key}.png", mime='image/png')
+                                    else:
+                                        try:
+                                            import altair_saver
+                                            png = altair_saver.save(chart, fmt='png')
+                                            st.download_button(label=f"Download {key}.png", data=png, file_name=f"{key}.png", mime='image/png')
+                                        except Exception:
+                                            # fallback: export chart spec as JSON for external conversion
+                                            spec_bytes = json.dumps(chart.to_dict(), ensure_ascii=False).encode('utf-8')
+                                            st.download_button(label=f"Download {key} (spec).json", data=spec_bytes, file_name=f"{key}.json", mime='application/json')
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        i += 1
+                else:
+                    st.warning('Nenhum gráfico extraído foi gerado com os filtros atuais. Verifique fonte, período e mapeamento.')
+            except Exception:
+                pass
             
             #devolucao ressarcimento e cartas de credito para latas e tampas
             c1, c2 = st.columns(2)
@@ -758,6 +1033,12 @@ if(login_inicio_c or login_inicio_g):
             
             with st.container(border=True, height=520):
                     st.write("Procedentes x RVT (tudo ou corretiva?)")
+
+        elif selecao_side_bar == "Metas 2026":
+            render_metas_dashboard(st.session_state.dados_carregados)
+
+        elif selecao_side_bar == "On-Site | Perdas":
+            render_onsite_dashboard()
 
         elif selecao_side_bar == get_text("cts_managers_section_title"):
             

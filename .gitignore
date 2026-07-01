@@ -7,9 +7,29 @@
 
 # Ignorar pasta de dados locais
 data/
+uploads/
+exports/
+
+# Ignorar exportacoes e planilhas com dados reais/sensiveis
+*.csv
+*.xls
+*.xlsx
+*.parquet
+*.docx
+*.zip
+
+# A planilha de metas e catalogo/modelo, nao base operacional
+!excel-metas/
+!excel-metas/Todas-metas-2026.xlsx
+
+# A pasta dados-onsite deve conter no maximo artefatos nao sensiveis
+dados-onsite/*
+!dados-onsite/*.sql
+!dados-onsite/.gitkeep
 
 # Ignorar arquivos de variáveis de ambiente e segredos
 .env
 .streamlit/secrets.toml
 
 .devcontainer/
+.vscode/

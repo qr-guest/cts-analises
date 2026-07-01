@@ -1,0 +1,1 @@
+"""Páginas analíticas do dashboard."""
