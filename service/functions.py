@@ -18,6 +18,17 @@ from streamlit_flow.state import StreamlitFlowState
 from copy import deepcopy
 import difflib
 
+
+def get_config_value(key, default=""):
+    env_value = os.getenv(key)
+    if env_value not in (None, ""):
+        return env_value
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+
 @st.cache_data
 def load_translation(language):
     """Carrega o arquivo JSON de tradução para o idioma selecionado."""
@@ -662,7 +673,7 @@ def get_rvt_by_person(df_rvt, mes, ano, ytd):
     else: df_filtrado_mes = filtrar_por_mes(df_rvt, 'DataInicio', mes, ano) #por que data início e não data de criação do RVT?
     indice = 0
     for responsavel in df_filtrado_mes['ResponsavelBall']:
-        if responsavel != os.getenv("nome_ignorado1") and responsavel != os.getenv("nome_ignorado2"):
+        if responsavel != get_config_value("nome_ignorado1") and responsavel != get_config_value("nome_ignorado2"):
             dados_atuais[responsavel] += 1
         indice +=1
 

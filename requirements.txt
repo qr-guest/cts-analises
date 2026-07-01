@@ -1,7 +1,6 @@
 pandas
 streamlit-option-menu
 python-dotenv
-dotenv
 Unidecode
 plotly
 openpyxl

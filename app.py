@@ -27,8 +27,18 @@ EXPECTED_UPLOAD_FILES = [
 ]
 
 
+def get_config_value(key, default=""):
+    env_value = os.getenv(key)
+    if env_value not in (None, ""):
+        return env_value
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+
 def app_debug_enabled():
-    return os.getenv("APP_DEBUG", "").strip().lower() in {"1", "true", "yes", "sim"}
+    return get_config_value("APP_DEBUG", "").strip().lower() in {"1", "true", "yes", "sim"}
 
 
 def render_upload_status(uploaded_files):
@@ -148,10 +158,10 @@ def check_password():
         password = st.text_input(get_text("password_label"), type="password")
         submitted = st.form_submit_button(get_text("enter_button"))
 
-        if submitted and password == os.getenv("APP_PASSWORD_G"):
+        if submitted and password == get_config_value("APP_PASSWORD_G"):
             st.session_state["password_correct_g"] = True
             st.rerun()
-        elif submitted and password == os.getenv("APP_PASSWORD_C"):
+        elif submitted and password == get_config_value("APP_PASSWORD_C"):
             st.session_state["password_correct_c"] = True
             st.rerun()
         elif submitted:
@@ -294,7 +304,7 @@ if(login_inicio_c or login_inicio_g):
         with kpi_lang:
             st.metric("Idioma", "ES" if st.session_state.get("language") == "es" else "PT")
 
-        logo = str(os.getenv("logo"))
+        logo = str(get_config_value("logo"))
         ##st.logo(logo)
 
         if(login_inicio_g):
