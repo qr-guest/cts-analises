@@ -10,6 +10,12 @@ from service.onsite_damage import (
     enrich_with_damage,
     parse_damage_response,
 )
+from service.onsite_nf import (
+    build_nf_validation,
+    extract_nf_candidates,
+    normalize_nf,
+    prepare_sap_nf_data,
+)
 from src.charts import (
     chart_evolucao_amassadas,
     chart_faltantes_vs_amassadas,
@@ -36,6 +42,47 @@ from service.onsite import (
 
 
 class OnsiteMetricsTests(unittest.TestCase):
+    def test_nf_normalization_and_extraction(self):
+        self.assertEqual(normalize_nf("000418514-3"), "418514")
+        self.assertEqual(normalize_nf(" 000041221-1 "), "41221")
+        self.assertEqual(
+            extract_nf_candidates(
+                "21 jun 2026 / Ball Jacarei / 41185; 41187"
+            ),
+            ["2026", "41185", "41187"],
+        )
+
+    def test_sap_nf_validation_matches_invoice_in_inspection_name(self):
+        sap_source = pd.DataFrame(
+            {
+                "Data da fatura": ["2026-06-22", "2026-06-22"],
+                "Unidade": ["AB JACAREI", "AB JACAREI"],
+                "Texto breve material": ["LT A", "LT A"],
+                "Nota Fiscal": ["000418514-3", "000418515-3"],
+                "Sales Quantity FG": ["10", "20"],
+                "Grupo de material 5": ["350", "350"],
+                "Centro": ["BRJC", "BRJC"],
+            }
+        )
+        sap_df, sap_summary = prepare_sap_nf_data(sap_source)
+        onsite = pd.DataFrame(
+            {
+                "INSPECTION_ID": ["A"],
+                "INSPECTION_NAME": ["Ball Jacarei / cliente / 418514"],
+                "DATA_INSPECAO": pd.to_datetime(["2026-06-23"]),
+                "DESTINO_CLIENTE": ["Cliente"],
+                "TOTAL_LATAS_FALTANTES": [0],
+            }
+        )
+        validation = build_nf_validation(onsite, sap_df, sap_summary)
+        self.assertEqual(validation["kpis"]["sap_unique_nfs"], 2)
+        self.assertEqual(validation["kpis"]["found_nfs"], 1)
+        self.assertEqual(validation["kpis"]["missing_nfs"], 1)
+        self.assertEqual(validation["kpis"]["sap_quantity_found"], 10)
+        self.assertEqual(
+            validation["missing"].iloc[0]["NF_ORIGINAL"], "000418515-3"
+        )
+
     def test_kpis_use_explicit_denominators(self):
         df = pd.DataFrame(
             {

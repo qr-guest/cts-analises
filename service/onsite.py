@@ -14,6 +14,13 @@ from service.onsite_damage import (
     find_default_damage_path,
     render_damage_analysis,
 )
+from service.onsite_nf import (
+    build_nf_validation,
+    find_default_sap_nf_path,
+    load_sap_nf_file,
+    load_sap_nf_upload,
+    prepare_sap_nf_data,
+)
 
 
 DEFAULT_ONSITE_PATH = Path(
@@ -22,6 +29,7 @@ DEFAULT_ONSITE_PATH = Path(
 LOCAL_DATA_ENV = "ALLOW_LOCAL_DATA"
 ONSITE_UPLOAD_STATE_KEY = "onsite_uploaded_csv"
 ONSITE_DAMAGE_UPLOAD_STATE_KEY = "onsite_uploaded_damage_csv"
+ONSITE_SAP_NF_UPLOAD_STATE_KEY = "onsite_uploaded_sap_nf"
 
 EXPECTED_COLUMNS = [
     "INSPECTION_ID",
@@ -131,6 +139,17 @@ def load_onsite_csv(path, modified_at):
 @st.cache_data(show_spinner=False)
 def load_onsite_upload(contents):
     return _read_csv(io.BytesIO(contents))
+
+
+@st.cache_data(show_spinner=False)
+def load_sap_nf_file_cached(path, modified_at):
+    del modified_at
+    return load_sap_nf_file(path)
+
+
+@st.cache_data(show_spinner=False)
+def load_sap_nf_upload_cached(contents, filename):
+    return load_sap_nf_upload(contents, filename)
 
 
 def validate_onsite_schema(df):
@@ -1301,6 +1320,238 @@ def _render_details(df):
     )
 
 
+def _render_nf_validation(df, nf_context):
+    st.subheader("Validação SAP x iAuditor")
+    st.caption(
+        "Esta visão cruza a Nota Fiscal do SAP com os números encontrados no "
+        "nome da inspeção do iAuditor. A comparação usa a NF sem zeros à "
+        "esquerda e sem o dígito após o hífen."
+    )
+
+    if not nf_context:
+        st.info(
+            "Carregue a planilha completa de NF SAP em Fonte de dados para "
+            "validar a cobertura do iAuditor."
+        )
+        return
+
+    validation = build_nf_validation(
+        df,
+        nf_context["nf_df"],
+        nf_context["summary"],
+    )
+    kpis = validation["kpis"]
+
+    st.caption(
+        f"Fonte SAP ativa: {nf_context['source_name']} · "
+        f"Coluna de quantidade: "
+        f"{nf_context['summary'].get('quantity_column') or 'não identificada'}"
+    )
+
+    row_one = st.columns(4)
+    row_one[0].metric("Linhas SAP", _fmt_int(kpis["sap_raw_rows"]))
+    row_one[1].metric("NFs únicas SAP", _fmt_int(kpis["sap_unique_nfs"]))
+    row_one[2].metric("NFs encontradas", _fmt_int(kpis["found_nfs"]))
+    row_one[3].metric(
+        "% cobertura", f"{_fmt_decimal(kpis['coverage_percent'])}%"
+    )
+
+    row_two = st.columns(4)
+    row_two[0].metric(
+        "Linhas repetidas exatas",
+        _fmt_int(kpis["sap_exact_duplicate_rows"]),
+    )
+    row_two[1].metric("NFs sem inspeção", _fmt_int(kpis["missing_nfs"]))
+    row_two[2].metric(
+        "Inspeções com NF SAP", _fmt_int(kpis["inspection_with_nf"])
+    )
+    row_two[3].metric(
+        "Inspeções com mais de uma NF",
+        _fmt_int(kpis["inspections_multiple_nfs"]),
+    )
+
+    row_three = st.columns(3)
+    row_three[0].metric(
+        "Quantidade SAP total", _fmt_decimal(kpis["sap_quantity_total"])
+    )
+    row_three[1].metric(
+        "Quantidade SAP encontrada", _fmt_decimal(kpis["sap_quantity_found"])
+    )
+    row_three[2].metric(
+        "Quantidade SAP sem inspeção",
+        _fmt_decimal(kpis["sap_quantity_missing"]),
+    )
+
+    st.caption(
+        "As linhas repetidas exatas são removidas antes de somar a quantidade "
+        "SAP. NFs repetidas depois disso podem representar mais de um item ou "
+        "material na mesma nota."
+    )
+
+    status = validation["status"].copy()
+    missing = validation["missing"].copy()
+    pairs = validation["pairs"].copy()
+
+    chart_data = pd.DataFrame(
+        {
+            "Status": ["Encontradas", "Não encontradas"],
+            "NFs": [kpis["found_nfs"], kpis["missing_nfs"]],
+        }
+    )
+    figure = px.bar(
+        chart_data,
+        x="Status",
+        y="NFs",
+        text="NFs",
+        color="Status",
+        color_discrete_map={
+            "Encontradas": "#2E7D32",
+            "Não encontradas": "#C62828",
+        },
+        title="Cobertura de NFs SAP no iAuditor",
+    )
+    figure.update_traces(texttemplate="<b>%{text:,.0f}</b>", textposition="outside")
+    figure.update_layout(showlegend=False, height=360)
+    st.plotly_chart(figure, width="stretch")
+
+    missing_tab, matched_tab, full_tab = st.tabs(
+        ["NFs sem inspeção", "NFs encontradas", "Base completa"]
+    )
+
+    with missing_tab:
+        if missing.empty:
+            st.success("Todas as NFs SAP foram encontradas no iAuditor.")
+        else:
+            missing = missing.sort_values(
+                ["DATA_FATURA", "NF_ORIGINAL"],
+                ascending=[False, True],
+                na_position="last",
+            )
+            display_columns = [
+                "NF_ORIGINAL",
+                "DATA_FATURA",
+                "UNIDADES_SAP",
+                "CENTROS_SAP",
+                "QUANTIDADE_SAP",
+                "MATERIAIS_SAP",
+            ]
+            st.dataframe(
+                missing[display_columns],
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "NF_ORIGINAL": "Nota Fiscal",
+                    "DATA_FATURA": st.column_config.DateColumn(
+                        "Data da fatura", format="DD/MM/YYYY"
+                    ),
+                    "UNIDADES_SAP": "Unidade",
+                    "CENTROS_SAP": "Centro",
+                    "QUANTIDADE_SAP": st.column_config.NumberColumn(
+                        "Quantidade SAP", format="%.3f"
+                    ),
+                    "MATERIAIS_SAP": "Materiais",
+                },
+            )
+            st.download_button(
+                "Baixar NFs sem inspeção",
+                data=missing.to_csv(index=False).encode("utf-8-sig"),
+                file_name="sap_nfs_sem_inspecao_iauditor.csv",
+                mime="text/csv",
+                key="onsite_nf_download_missing",
+            )
+
+    with matched_tab:
+        if pairs.empty:
+            st.info("Nenhuma NF SAP foi encontrada nas inspeções do iAuditor.")
+        else:
+            pairs = pairs.sort_values(
+                ["DATA_INSPECAO", "NF_ORIGINAL"],
+                ascending=[False, True],
+                na_position="last",
+            )
+            display_columns = [
+                "NF_ORIGINAL",
+                "DATA_FATURA",
+                "INSPECTION_ID",
+                "INSPECTION_NAME",
+                "DATA_INSPECAO",
+                "DESTINO_CLIENTE",
+                "TRANSPORTADORA",
+                "CAMINHAO_OU_PLACA",
+                "QUANTIDADE_SAP",
+                "TOTAL_LATAS_FALTANTES",
+                "TOTAL_LATAS_AMASSADAS",
+                "WEBLINK",
+            ]
+            available = [
+                column for column in display_columns if column in pairs.columns
+            ]
+            st.dataframe(
+                pairs[available],
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "NF_ORIGINAL": "Nota Fiscal",
+                    "DATA_FATURA": st.column_config.DateColumn(
+                        "Data da fatura", format="DD/MM/YYYY"
+                    ),
+                    "DATA_INSPECAO": st.column_config.DatetimeColumn(
+                        "Data da inspeção", format="DD/MM/YYYY HH:mm"
+                    ),
+                    "QUANTIDADE_SAP": st.column_config.NumberColumn(
+                        "Quantidade SAP", format="%.3f"
+                    ),
+                    "TOTAL_LATAS_FALTANTES": st.column_config.NumberColumn(
+                        "Latas faltantes", format="%.0f"
+                    ),
+                    "TOTAL_LATAS_AMASSADAS": st.column_config.NumberColumn(
+                        "Latas amassadas", format="%.0f"
+                    ),
+                    "WEBLINK": st.column_config.LinkColumn(
+                        "Abrir inspeção", display_text="Abrir"
+                    ),
+                },
+            )
+            st.download_button(
+                "Baixar cruzamento NF x inspeção",
+                data=pairs.to_csv(index=False).encode("utf-8-sig"),
+                file_name="sap_nfs_encontradas_iauditor.csv",
+                mime="text/csv",
+                key="onsite_nf_download_pairs",
+            )
+
+    with full_tab:
+        status = status.sort_values(
+            ["STATUS_VALIDACAO", "DATA_FATURA", "NF_ORIGINAL"],
+            ascending=[True, False, True],
+            na_position="last",
+        )
+        st.dataframe(
+            status,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "NF_ORIGINAL": "Nota Fiscal",
+                "DATA_FATURA": st.column_config.DateColumn(
+                    "Data da fatura", format="DD/MM/YYYY"
+                ),
+                "QUANTIDADE_SAP": st.column_config.NumberColumn(
+                    "Quantidade SAP", format="%.3f"
+                ),
+                "INSPECOES_I_AUDITOR": st.column_config.NumberColumn(
+                    "Inspeções iAuditor", format="%d"
+                ),
+            },
+        )
+        st.download_button(
+            "Baixar base completa de validação",
+            data=status.to_csv(index=False).encode("utf-8-sig"),
+            file_name="sap_validacao_nf_iauditor.csv",
+            mime="text/csv",
+            key="onsite_nf_download_status",
+        )
+
+
 def _render_quality(df, quality):
     cards = st.columns(4)
     cards[0].metric("Linhas na origem", _fmt_int(quality["source_rows"]))
@@ -1435,6 +1686,9 @@ def render_onsite_dashboard():
     default_damage_path = (
         find_default_damage_path() if _allow_local_data() else None
     )
+    default_sap_nf_path = (
+        find_default_sap_nf_path() if _allow_local_data() else None
+    )
     with st.expander("Fonte de dados", expanded=False):
         uploaded_file = st.file_uploader(
             "Carregar CSV consolidado gerado pelo SQL",
@@ -1456,14 +1710,26 @@ def render_onsite_dashboard():
                 "este upload não é necessário."
             ),
         )
+        uploaded_sap_nf_file = st.file_uploader(
+            "Fonte SAP de Notas Fiscais (opcional)",
+            type=["xlsx", "xls", "csv"],
+            key="onsite_sap_nf_upload",
+            help=(
+                "Carregue a planilha completa do SAP com a coluna Nota Fiscal "
+                "para validar quais NFs aparecem nas inspeções do iAuditor."
+            ),
+        )
         if _allow_local_data() and default_path is not None:
             st.caption(
                 "Modo local de desenvolvimento ativo por ALLOW_LOCAL_DATA=true. "
                 f"Fallback detectado: {default_path}"
             )
+        if _allow_local_data() and default_sap_nf_path is not None:
+            st.caption(f"Fallback NF SAP detectado: {default_sap_nf_path}")
         if st.button("Limpar base On-Site carregada", key="onsite_clear_uploads"):
             st.session_state.pop(ONSITE_UPLOAD_STATE_KEY, None)
             st.session_state.pop(ONSITE_DAMAGE_UPLOAD_STATE_KEY, None)
+            st.session_state.pop(ONSITE_SAP_NF_UPLOAD_STATE_KEY, None)
             st.rerun()
 
     if uploaded_file is not None:
@@ -1476,10 +1742,18 @@ def render_onsite_dashboard():
             "name": uploaded_damage_file.name,
             "contents": uploaded_damage_file.getvalue(),
         }
+    if uploaded_sap_nf_file is not None:
+        st.session_state[ONSITE_SAP_NF_UPLOAD_STATE_KEY] = {
+            "name": uploaded_sap_nf_file.name,
+            "contents": uploaded_sap_nf_file.getvalue(),
+        }
 
     stored_upload = st.session_state.get(ONSITE_UPLOAD_STATE_KEY)
     stored_damage_upload = st.session_state.get(
         ONSITE_DAMAGE_UPLOAD_STATE_KEY
+    )
+    stored_sap_nf_upload = st.session_state.get(
+        ONSITE_SAP_NF_UPLOAD_STATE_KEY
     )
 
     try:
@@ -1556,6 +1830,34 @@ def render_onsite_dashboard():
         source_name=damage_source_name,
     )
 
+    sap_nf_context = None
+    try:
+        if stored_sap_nf_upload is not None:
+            sap_nf_source = load_sap_nf_upload_cached(
+                stored_sap_nf_upload["contents"],
+                stored_sap_nf_upload["name"],
+            )
+            sap_nf_source_name = stored_sap_nf_upload["name"]
+        elif default_sap_nf_path is not None and default_sap_nf_path.exists():
+            sap_nf_source = load_sap_nf_file_cached(
+                str(default_sap_nf_path),
+                default_sap_nf_path.stat().st_mtime_ns,
+            )
+            sap_nf_source_name = default_sap_nf_path.name
+        else:
+            sap_nf_source = None
+            sap_nf_source_name = None
+
+        if sap_nf_source is not None:
+            sap_nf_df, sap_nf_summary = prepare_sap_nf_data(sap_nf_source)
+            sap_nf_context = {
+                "source_name": sap_nf_source_name,
+                "nf_df": sap_nf_df,
+                "summary": sap_nf_summary,
+            }
+    except Exception as error:
+        st.warning(f"A fonte SAP de NF nao pode ser lida: {error}")
+
     st.caption(
         f"Fonte ativa: {source_name} · "
         f"{_fmt_int(quality['analysis_rows'])} inspeções únicas"
@@ -1573,6 +1875,7 @@ def render_onsite_dashboard():
         trucks_tab,
         usage_tab,
         damage_tab,
+        nf_tab,
         details_tab,
         quality_tab,
     ) = st.tabs(
@@ -1583,6 +1886,7 @@ def render_onsite_dashboard():
             "Caminhão e Rota",
             "Uso da Plataforma",
             "Análise de Latas Amassadas",
+            "Validação SAP x iAuditor",
             "Detalhamento",
             "Qualidade de Dados",
         ]
@@ -1599,6 +1903,8 @@ def render_onsite_dashboard():
         _render_usage(filtered)
     with damage_tab:
         render_damage_analysis(filtered, damage_context)
+    with nf_tab:
+        _render_nf_validation(data, sap_nf_context)
     with details_tab:
         _render_details(filtered)
     with quality_tab:
