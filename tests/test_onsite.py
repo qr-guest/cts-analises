@@ -1,3 +1,4 @@
+import io
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from service.onsite_damage import (
 from service.onsite_nf import (
     build_nf_validation,
     extract_nf_candidates,
+    load_sap_nf_upload,
     normalize_nf,
     prepare_sap_nf_data,
 )
@@ -82,6 +84,24 @@ class OnsiteMetricsTests(unittest.TestCase):
         self.assertEqual(
             validation["missing"].iloc[0]["NF_ORIGINAL"], "000418515-3"
         )
+
+    def test_sap_upload_selects_sheet_with_sap_number_column(self):
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            pd.DataFrame({"Outra coluna": ["x"]}).to_excel(
+                writer, sheet_name="Resumo", index=False
+            )
+            pd.DataFrame(
+                {
+                    "Numero SAP": ["000418514-3", "000418515-3"],
+                    "Sales Quantity FG": ["10", "20"],
+                }
+            ).to_excel(writer, sheet_name="Base SAP", index=False)
+
+        source = load_sap_nf_upload(buffer.getvalue(), "sap.xlsx")
+        sap_df, summary = prepare_sap_nf_data(source)
+        self.assertEqual(summary["unique_nfs"], 2)
+        self.assertEqual(set(sap_df["NF_BASE"]), {"418514", "418515"})
 
     def test_kpis_use_explicit_denominators(self):
         df = pd.DataFrame(

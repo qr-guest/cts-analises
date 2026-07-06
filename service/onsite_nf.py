@@ -1,5 +1,6 @@
 import io
 import re
+import unicodedata
 from pathlib import Path
 
 import pandas as pd
@@ -55,10 +56,62 @@ def _find_column(columns, *terms):
     return None
 
 
+def _normalized_header(value):
+    text = unicodedata.normalize("NFKD", str(value))
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"[^A-Za-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip().upper()
+
+
+def _find_nf_column(columns):
+    for column in columns:
+        text = _normalized_header(column)
+        compact = text.replace(" ", "")
+        if "NOTA" in text and "FISCAL" in text:
+            return column
+        if compact in {"NF", "NUMERONF", "NRNF", "NROFISCAL"}:
+            return column
+        if (
+            "SAP" in text
+            and any(term in text for term in ("NUMERO", "NRO", "NR", "NOTA"))
+        ):
+            return column
+    return None
+
+
+def _nf_column_score(df, column):
+    if column is None or column not in df.columns:
+        return 0
+    values = df[column].dropna().astype(str).head(500)
+    normalized = values.map(normalize_nf).dropna()
+    return int(normalized.nunique())
+
+
+def _select_sap_sheet(sheets):
+    candidates = []
+    for sheet_name, df in sheets.items():
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+        df = df.copy()
+        df.columns = [str(column).strip() for column in df.columns]
+        nf_column = _find_nf_column(df.columns)
+        score = _nf_column_score(df, nf_column)
+        if nf_column is not None and score:
+            candidates.append((score, len(df), str(sheet_name), df))
+    if not candidates:
+        sheet_names = ", ".join(str(name) for name in sheets.keys())
+        raise ValueError(
+            "Não encontrei uma aba com coluna de NF/SAP. Abas lidas: "
+            + sheet_names
+        )
+    return max(candidates, key=lambda item: (item[0], item[1]))[3]
+
+
 def _read_sap_nf_file(source, filename=""):
     suffix = Path(filename).suffix.lower()
     if suffix in {".xlsx", ".xlsm", ".xls"}:
-        return pd.read_excel(source, dtype=str)
+        sheets = pd.read_excel(source, dtype=str, sheet_name=None)
+        return _select_sap_sheet(sheets)
     return pd.read_csv(source, dtype=str, encoding="utf-8-sig")
 
 
@@ -86,9 +139,12 @@ def prepare_sap_nf_data(source_df):
 
     source = source_df.copy()
     source.columns = [str(column).strip() for column in source.columns]
-    nf_column = _find_column(source.columns, "nota", "fiscal")
+    nf_column = _find_nf_column(source.columns)
     if nf_column is None:
-        raise ValueError("A planilha SAP precisa ter uma coluna de Nota Fiscal.")
+        raise ValueError(
+            "A planilha SAP precisa ter uma coluna de Nota Fiscal, NF ou "
+            "número SAP."
+        )
 
     raw_rows = len(source)
     exact_duplicate_rows = int(source.duplicated().sum())
