@@ -1328,10 +1328,39 @@ def _render_nf_validation(df, nf_context):
         "esquerda e sem o dígito após o hífen."
     )
 
+    uploaded_sap_nf_file = st.file_uploader(
+        "Carregar planilha completa de NF SAP",
+        type=["xlsx", "xls", "csv"],
+        key="onsite_nf_tab_upload",
+        help=(
+            "A planilha precisa conter a coluna Nota Fiscal. Se trouxer "
+            "Sales Quantity FG, a sub-aba também soma a quantidade SAP."
+        ),
+    )
+    if uploaded_sap_nf_file is not None:
+        st.session_state[ONSITE_SAP_NF_UPLOAD_STATE_KEY] = {
+            "name": uploaded_sap_nf_file.name,
+            "contents": uploaded_sap_nf_file.getvalue(),
+        }
+        try:
+            sap_nf_source = load_sap_nf_upload_cached(
+                uploaded_sap_nf_file.getvalue(),
+                uploaded_sap_nf_file.name,
+            )
+            sap_nf_df, sap_nf_summary = prepare_sap_nf_data(sap_nf_source)
+            nf_context = {
+                "source_name": uploaded_sap_nf_file.name,
+                "nf_df": sap_nf_df,
+                "summary": sap_nf_summary,
+            }
+        except Exception as error:
+            st.error(f"Não foi possível ler a planilha SAP: {error}")
+            return
+
     if not nf_context:
         st.info(
-            "Carregue a planilha completa de NF SAP em Fonte de dados para "
-            "validar a cobertura do iAuditor."
+            "Carregue a planilha completa de NF SAP nesta sub-aba para "
+            "visualizar a validação."
         )
         return
 
