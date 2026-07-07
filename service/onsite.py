@@ -1894,28 +1894,27 @@ def render_onsite_dashboard():
     filtered = _render_filters(data, quality)
     if filtered.empty:
         st.warning("Nenhuma inspeção corresponde aos filtros selecionados.")
-        return
 
     _render_kpis(filtered)
     (
         overview_tab,
+        nf_tab,
         clients_tab,
         carriers_tab,
         trucks_tab,
         usage_tab,
         damage_tab,
-        nf_tab,
         details_tab,
         quality_tab,
     ) = st.tabs(
         [
             "Visão Geral Executiva",
+            "SAP x iAuditor",
             "Cliente/Destino",
             "Transportadora",
             "Caminhão e Rota",
             "Uso da Plataforma",
             "Análise de Latas Amassadas",
-            "Validação SAP x iAuditor",
             "Detalhamento",
             "Qualidade de Dados",
         ]
